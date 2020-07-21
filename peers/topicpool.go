@@ -103,7 +103,7 @@ type TopicPool struct {
 }
 
 func (t *TopicPool) addToPendingPeers(peer *peerInfo) {
-	log.Debug("adding to pending peers", "peer", peer.NodeID())
+	log.Debug("adding to pending peers", "peer", peer.NodeID(), "discovered time", peer.discoveredTime)
 	if _, ok := t.pendingPeers[peer.NodeID()]; ok {
 		log.Debug("already added to pending peers", "peer", peer.NodeID())
 		return
@@ -507,6 +507,7 @@ func (t *TopicPool) processFoundNode(server *p2p.Server, node *discv5.Node) erro
 	}
 	log.Debug(
 		"adding peer to a server", "peer", node.ID.String(),
+		"nodeID", nodeID,
 		"connected", len(t.connectedPeers), "max", t.maxCachedPeers)
 	// the upper limit is not reached, so let's add this peer
 	if len(t.connectedPeers) < t.maxCachedPeers {

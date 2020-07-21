@@ -103,27 +103,35 @@ type TopicPool struct {
 }
 
 func (t *TopicPool) addToPendingPeers(peer *peerInfo) {
+	log.Debug("adding to pending peers", "peer", peer.NodeID())
 	if _, ok := t.pendingPeers[peer.NodeID()]; ok {
+		log.Debug("already added to pending peers", "peer", peer.NodeID())
 		return
 	}
 	t.pendingPeers[peer.NodeID()] = &peerInfoItem{
 		peerInfo: peer,
 		index:    notQueuedIndex,
 	}
+	log.Debug("added to pending peers", "peer", peer.NodeID())
 
 	// maxPendingPeers = 0 means no limits.
 	if t.maxPendingPeers == 0 || t.maxPendingPeers >= len(t.pendingPeers) {
+		log.Debug("no need to remove peers", "peer", peer.NodeID(), "count", len(t.pendingPeers))
 		return
 	}
 
+	log.Debug("removing from pending peers", "peer", peer.NodeID())
 	var oldestPeer *peerInfo
 	for _, i := range t.pendingPeers {
+		log.Debug("checking discovered time", "peer", peer.NodeID(), "discovered time", i.peerInfo.discoveredTime, "peer-id", i.NodeID())
 		if oldestPeer != nil && oldestPeer.discoveredTime < i.peerInfo.discoveredTime {
 			continue
 		}
 
 		oldestPeer = i.peerInfo
 	}
+
+	log.Debug("got oldest peer", "peer", peer.NodeID(), "oldest", oldestPeer.NodeID())
 
 	t.removeFromPendingPeers(oldestPeer.NodeID())
 }
@@ -151,6 +159,7 @@ func (t *TopicPool) popFromQueue() *peerInfo {
 }
 
 func (t *TopicPool) removeFromPendingPeers(nodeID enode.ID) {
+	log.Debug("removing oldest pending peer", "peer", nodeID)
 	peer, ok := t.pendingPeers[nodeID]
 	if !ok {
 		return

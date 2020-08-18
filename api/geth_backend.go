@@ -909,12 +909,14 @@ func (b *GethStatusBackend) StopWallet() error {
 }
 
 func (b *GethStatusBackend) StartWallet() error {
+	b.log.Info("Start wallet called")
 	wallet, err := b.statusNode.WalletService()
 	if err != nil {
 		b.log.Error("Retrieving of wallet service failed on StartWallet", "error", err)
 		return nil
 	}
 	if !wallet.IsStarted() {
+		b.log.Info("Start wallet is not started")
 		err = wallet.Start(b.statusNode.Server())
 		if err != nil {
 			b.log.Error("Wallet service start failed on StartWallet", "error", err)
@@ -926,8 +928,10 @@ func (b *GethStatusBackend) StartWallet() error {
 			b.log.Error("Wallet reactor start failed on StartWallet", "error", err)
 			return nil
 		}
-	}
+	} else {
+		b.log.Info("Start wallet is started")
 
+	}
 	b.forceStopWallet = false
 
 	return nil
@@ -1093,7 +1097,9 @@ func (b *GethStatusBackend) injectAccountIntoServices() error {
 }
 
 func (b *GethStatusBackend) startWallet() error {
+	b.log.Info("private start wallet called")
 	if !b.statusNode.Config().WalletConfig.Enabled {
+		b.log.Info("not enabled wallet")
 		return nil
 	}
 
@@ -1121,6 +1127,7 @@ func (b *GethStatusBackend) startWallet() error {
 		}
 	}
 
+	b.log.Info("starting reactor", "addresses", allAddresses, "client", b.statusNode.RPCClient().Ethclient())
 	return wallet.StartReactor(
 		b.statusNode.RPCClient().Ethclient(),
 		allAddresses,

@@ -49,7 +49,7 @@ func (tmr *SignalsTransmitter) Start() error {
 				}
 				return
 			case event := <-events:
-				tmr.localNotifications.PublishMessage(localnotifications.Transaction, event)
+				tmr.localNotifications.PublishMessage(localnotifications.Transaction, localnotifications.TransactionEvent{Type: string(event.Type)})
 				signal.SendWalletEvent(event)
 			}
 		}

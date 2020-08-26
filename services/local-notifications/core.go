@@ -2,13 +2,13 @@ package localnotifications
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"math/big"
+
+	messagebus "github.com/vardius/message-bus"
 
 	"github.com/status-im/status-go/signal"
 
-	messagebus "github.com/vardius/message-bus"
+	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -74,10 +74,6 @@ func InitializeBus(queueSize int) *Broker {
 }
 
 func pushMessage(notification *Notification) {
-	// Send signal with this notification
-	jsonBody, _ := json.Marshal(notification)
-	fmt.Println(string(jsonBody))
-
 	signal.SendLocalNotifications(notification)
 }
 
@@ -90,10 +86,6 @@ func buildTransactionNotification(payload messagePayload) *Notification {
 		Value: transaction.Type,
 	}
 
-	for i, s := range transaction.Accounts {
-		fmt.Println(i, s)
-	}
-
 	return &Notification{
 		ID:       string(transaction.Type),
 		Body:     body,
@@ -101,8 +93,8 @@ func buildTransactionNotification(payload messagePayload) *Notification {
 	}
 }
 
-// TransactionsHandler - Handles new transaction messages
-func TransactionsHandler(ctx context.Context, payload messagePayload) {
+func transactionsHandler(ctx context.Context, payload messagePayload) {
+	log.Info("Handled a new transactopn")
 	n := buildTransactionNotification(payload)
 	pushMessage(n)
 }
@@ -110,9 +102,8 @@ func TransactionsHandler(ctx context.Context, payload messagePayload) {
 // NotificationWorker - Worker which processes all incoming messages
 func (s *Broker) NotificationWorker() error {
 
-	fmt.Println("NotificationWorker")
-
-	if err := s.bus.Subscribe(string(Transaction), TransactionsHandler); err != nil {
+	if err := s.bus.Subscribe(string(Transaction), transactionsHandler); err != nil {
+		log.Error("Could not create subscription", "error", err)
 		return err
 	}
 
@@ -122,5 +113,4 @@ func (s *Broker) NotificationWorker() error {
 // PublishMessage - Send new message to be processed into a notification
 func (s *Broker) PublishMessage(messageType MessageType, payload interface{}) {
 	s.bus.Publish(string(messageType), s.ctx, messagePayload(payload))
-	fmt.Println("Messag published", string(messageType))
 }

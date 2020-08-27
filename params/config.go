@@ -425,6 +425,9 @@ type NodeConfig struct {
 	// WalletConfig extra configuration for wallet.Service.
 	WalletConfig WalletConfig
 
+	// WalleLocalNotificationsConfig extra configuration for localnotifications.Service.
+	LocalNotificationsConfig LocalNotificationsConfig
+
 	// BrowsersConfig extra configuration for browsers.Service.
 	BrowsersConfig BrowsersConfig
 
@@ -455,6 +458,11 @@ type NodeConfig struct {
 
 // WalletConfig extra configuration for wallet.Service.
 type WalletConfig struct {
+	Enabled bool
+}
+
+// LocalNotificationsConfig extra configuration for localnotifications.Service.
+type LocalNotificationsConfig struct {
 	Enabled bool
 }
 

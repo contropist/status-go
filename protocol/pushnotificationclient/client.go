@@ -211,8 +211,6 @@ func (c *Client) Start() error {
 		return errors.New("can't start, missing message processor")
 	}
 
-	c.config.Logger.Debug("starting push notification client", zap.Any("config", c.config))
-
 	err := c.loadLastPushNotificationRegistration()
 	if err != nil {
 		return err

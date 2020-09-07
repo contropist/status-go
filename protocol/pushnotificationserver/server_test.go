@@ -670,3 +670,197 @@ func (s *ServerSuite) TestPushNotificationDisabledMentions() {
 	s.Require().NotNil(pushNotificationResponse)
 	s.Require().Nil(requestAndRegistrations)
 }
+
+func (s *ServerSuite) TestBuildPushNotificationReport() {
+	accessToken := "a"
+	chatID := []byte("chat-id")
+	blockedChatID := []byte("blocked-chat-id")
+	blockedChatList := [][]byte{blockedChatID}
+	nonJoinedChatID := []byte("non-joined-chat-id")
+	allowedMentionsChatList := [][]byte{chatID}
+	validMessagePN := &protobuf.PushNotification{
+		Type:        protobuf.PushNotification_MESSAGE,
+		ChatId:      chatID,
+		AccessToken: accessToken,
+	}
+	validMentionPN := &protobuf.PushNotification{
+		Type:        protobuf.PushNotification_MENTION,
+		ChatId:      chatID,
+		AccessToken: accessToken,
+	}
+	validRegistration := &protobuf.PushNotificationRegistration{
+		AccessToken:             accessToken,
+		BlockedChatList:         blockedChatList,
+		AllowedMentionsChatList: allowedMentionsChatList,
+	}
+	blockedMentionsRegistration := &protobuf.PushNotificationRegistration{
+		AccessToken:             accessToken,
+		BlockMentions:           true,
+		BlockedChatList:         blockedChatList,
+		AllowedMentionsChatList: allowedMentionsChatList,
+	}
+
+	testCases := []struct {
+		name             string
+		pn               *protobuf.PushNotification
+		registration     *protobuf.PushNotificationRegistration
+		expectedError    error
+		expectedResponse *reportResult
+	}{
+		{
+			name:         "valid message",
+			pn:           validMessagePN,
+			registration: validRegistration,
+			expectedResponse: &reportResult{
+				sendNotification: true,
+				report: &protobuf.PushNotificationReport{
+					Success: true,
+				},
+			},
+		},
+		{
+			name:         "valid mention",
+			pn:           validMentionPN,
+			registration: validRegistration,
+			expectedResponse: &reportResult{
+				sendNotification: true,
+				report: &protobuf.PushNotificationReport{
+					Success: true,
+				},
+			},
+		},
+		{
+			name: "unknow push notification",
+			pn: &protobuf.PushNotification{
+				ChatId:      chatID,
+				AccessToken: accessToken,
+			},
+			registration:  validRegistration,
+			expectedError: errUnhandledPushNotificationType,
+		},
+		{
+			name:         "empty registration",
+			pn:           validMessagePN,
+			registration: nil,
+			expectedResponse: &reportResult{
+				sendNotification: false,
+				report: &protobuf.PushNotificationReport{
+					Success: false,
+					Error:   protobuf.PushNotificationReport_NOT_REGISTERED,
+				},
+			},
+		},
+		{
+			name: "invalid access token message",
+			pn: &protobuf.PushNotification{
+				Type:        protobuf.PushNotification_MESSAGE,
+				ChatId:      chatID,
+				AccessToken: "invalid",
+			},
+			registration: validRegistration,
+			expectedResponse: &reportResult{
+				sendNotification: false,
+				report: &protobuf.PushNotificationReport{
+					Success: false,
+					Error:   protobuf.PushNotificationReport_WRONG_TOKEN,
+				},
+			},
+		},
+		{
+			name: "invalid access token mention",
+			pn: &protobuf.PushNotification{
+				Type:        protobuf.PushNotification_MENTION,
+				ChatId:      chatID,
+				AccessToken: "invalid",
+			},
+			registration: validRegistration,
+			expectedResponse: &reportResult{
+				sendNotification: false,
+				report: &protobuf.PushNotificationReport{
+					Success: false,
+					Error:   protobuf.PushNotificationReport_WRONG_TOKEN,
+				},
+			},
+		},
+		{
+			name: "blocked chat list message",
+			pn: &protobuf.PushNotification{
+				Type:        protobuf.PushNotification_MESSAGE,
+				ChatId:      blockedChatID,
+				AccessToken: accessToken,
+			},
+			registration: validRegistration,
+			expectedResponse: &reportResult{
+				sendNotification: false,
+				report: &protobuf.PushNotificationReport{
+					Success: true,
+				},
+			},
+		},
+		{
+			name: "blocked chat list mention",
+			pn: &protobuf.PushNotification{
+				Type:        protobuf.PushNotification_MENTION,
+				ChatId:      blockedChatID,
+				AccessToken: accessToken,
+			},
+			registration: validRegistration,
+			expectedResponse: &reportResult{
+				sendNotification: false,
+				report: &protobuf.PushNotificationReport{
+					Success: true,
+				},
+			},
+		},
+		{
+			name: "blocked mentions",
+			pn: &protobuf.PushNotification{
+				Type:        protobuf.PushNotification_MENTION,
+				ChatId:      chatID,
+				AccessToken: accessToken,
+			},
+			registration: blockedMentionsRegistration,
+			expectedResponse: &reportResult{
+				sendNotification: false,
+				report: &protobuf.PushNotificationReport{
+					Success: true,
+				},
+			},
+		},
+		{
+			name: "not in allowed mention chat list",
+			pn: &protobuf.PushNotification{
+				Type:        protobuf.PushNotification_MENTION,
+				ChatId:      nonJoinedChatID,
+				AccessToken: accessToken,
+			},
+			registration: validRegistration,
+			expectedResponse: &reportResult{
+				sendNotification: false,
+				report: &protobuf.PushNotificationReport{
+					Success: true,
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		s.Run(tc.name, func() {
+			response, err := s.server.buildPushNotificationReport(tc.pn, tc.registration)
+			s.Require().Equal(tc.expectedError, err)
+			s.Require().Equal(tc.expectedResponse, response)
+		})
+	}
+
+	/*
+
+		// blocked chat list message
+		response, err = s.server.buildPushNotificationReport(pn, registration)
+		s.Require().NoError(err)
+		s.Require().NotNil(response)
+		report = response.report
+
+		s.Require().False(response.sendNotification)
+		s.Require().False(report.Success)
+		s.Require().Equal(protobuf.PushNotificationReport_WRONG_TOKEN, report.Error)*/
+}

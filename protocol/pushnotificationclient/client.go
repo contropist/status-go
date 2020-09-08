@@ -1344,9 +1344,7 @@ func (c *Client) sendNotification(publicKey *ecdsa.PublicKey, installationIDs []
 		var pushNotifications []*protobuf.PushNotification
 		for _, i := range infos {
 			pushNotifications = append(pushNotifications, &protobuf.PushNotification{
-				Type: notificationType,
-				// For now we set the ChatID to our own identity key, this will work fine for blocked users
-				// and muted 1-to-1 chats, but not for group chats.
+				Type:           notificationType,
 				ChatId:         common.Shake256([]byte(chatID)),
 				AccessToken:    i.AccessToken,
 				PublicKey:      common.HashPublicKey(publicKey),

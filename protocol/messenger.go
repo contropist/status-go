@@ -2110,7 +2110,8 @@ type CurrentMessageState struct {
 	// Contact is the contact associated with the author of the message
 	Contact *Contact
 	// PublicKey is the public key of the author of the message
-	PublicKey *ecdsa.PublicKey
+	PublicKey  *ecdsa.PublicKey
+	RawMessage *v1protocol.StatusMessage
 }
 
 type ReceivedMessageState struct {
@@ -2214,6 +2215,7 @@ func (m *Messenger) handleRetrievedMessages(chatWithMessages map[transport.Filte
 					WhisperTimestamp: uint64(msg.TransportMessage.Timestamp) * 1000,
 					Contact:          contact,
 					PublicKey:        publicKey,
+					RawMessage:       msg,
 				}
 
 				if msg.ParsedMessage != nil {

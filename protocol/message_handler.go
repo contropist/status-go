@@ -326,8 +326,9 @@ func (m *MessageHandler) HandlePairInstallation(state *ReceivedMessageState, mes
 
 func (m *MessageHandler) HandleChatMessage(state *ReceivedMessageState) error {
 	logger := m.logger.With(zap.String("site", "handleChatMessage"))
+	logger.Info("message", zap.String("hash", types.EncodeHex(state.CurrentMessageState.RawMessage.TransportMessage.Hash)), zap.String("text", state.CurrentMessageState.Message.Text))
 	if err := ValidateReceivedChatMessage(&state.CurrentMessageState.Message, state.CurrentMessageState.WhisperTimestamp); err != nil {
-		logger.Warn("failed to validate message", zap.Error(err))
+		logger.Warn("failed to validate message", zap.Error(err), zap.String("hash", types.EncodeHex(state.CurrentMessageState.RawMessage.TransportMessage.Hash)), zap.String("text", state.CurrentMessageState.Message.Text))
 		return err
 	}
 	receivedMessage := &common.Message{

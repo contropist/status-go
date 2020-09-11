@@ -45,6 +45,7 @@ type Peer interface {
 	ID() []byte
 	IP() net.IP
 	EnodeID() enode.ID
+	Name() string
 
 	PoWRequirement() float64
 	BloomFilter() []byte

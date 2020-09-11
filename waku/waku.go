@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -1083,7 +1084,14 @@ func (w *Waku) HandlePeer(peer common.Peer, rw p2p.MsgReadWriter) error {
 	w.peers[peer] = struct{}{}
 	w.peerMu.Unlock()
 
-	w.logger.Debug("handling peer", zap.String("id", types.EncodeHex(peer.ID())))
+	peerID := types.EncodeHex(peer.ID())
+	w.logger.Info("handling peer", zap.String("id", peerID), zap.String("ip", peer.IP().String()))
+
+	/*
+		if w.softBlacklisted(peerID) || "36.148.71.37" == peer.IP().String() || "47.244.23.27" == peer.IP().String() {
+			w.logger.Info("peer is blacklisted, disconnecting", zap.String("peer", peerID), zap.String("ip", peer.IP().String()))
+			return errors.New("blacklisted")
+		}*/
 
 	defer func() {
 		w.peerMu.Lock()
@@ -1109,7 +1117,20 @@ func (w *Waku) HandlePeer(peer common.Peer, rw p2p.MsgReadWriter) error {
 	return err
 }
 
-func (w *Waku) softBlacklisted(peerID string) bool {
+func (w *Waku) softBlacklisted(peer common.Peer) bool {
+	ip := peer.IP().String()
+	peerID := types.EncodeHex(peer.ID())
+
+	if strings.Contains(peer.Name(), "spam") {
+		return true
+	}
+
+	if ip == "36.148.71.37" ||
+		ip == "47.244.23.27" ||
+		ip == "36.148.71.58" ||
+		strings.HasPrefix(ip, "36.148.71") {
+		return true
+	}
 	w.settingsMu.RLock()
 	defer w.settingsMu.RUnlock()
 	return w.settings.SoftBlacklistedPeerIDs[peerID]
@@ -1121,13 +1142,13 @@ func (w *Waku) OnNewEnvelopes(envelopes []*common.Envelope, peer common.Peer) ([
 	w.logger.Debug("received new envelopes", zap.Int("count", len(envelopes)), zap.String("peer", peerID))
 	trouble := false
 
-	if w.softBlacklisted(peerID) {
-		w.logger.Debug("peer is soft blacklisted", zap.String("peer", peerID))
+	if w.softBlacklisted(peer) {
+		w.logger.Info("peer is soft blacklisted", zap.String("peer", peerID), zap.String("ip", peer.IP().String()))
 		return nil, nil
 	}
 
 	for _, env := range envelopes {
-		w.logger.Debug("received new envelope", zap.String("peer", peerID), zap.String("hash", env.Hash().Hex()))
+		w.logger.Info("received new envelope", zap.String("peer", peerID), zap.String("hash", env.Hash().Hex()))
 		cached, err := w.add(env, w.LightClientMode())
 		if err != nil {
 			_, isTimeSyncError := err.(common.TimeSyncError)

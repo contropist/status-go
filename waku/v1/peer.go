@@ -178,6 +178,10 @@ func (p *Peer) IP() net.IP {
 	return p.p2pPeer.Node().IP()
 }
 
+func (p *Peer) Name() string {
+	return p.p2pPeer.Name()
+}
+
 func (p *Peer) Run() error {
 	logger := p.logger.Named("Run")
 
@@ -456,7 +460,12 @@ func (p *Peer) update() {
 
 func (p *Peer) setOptions(peerOptions StatusOptions) error {
 
-	p.logger.Debug("settings options", zap.String("peerID", types.EncodeHex(p.ID())), zap.Any("Options", peerOptions))
+	var lightNodeEnabled bool
+	if peerOptions.LightNodeEnabled != nil {
+		lightNodeEnabled = *peerOptions.LightNodeEnabled
+	}
+
+	p.logger.Info("settings options", zap.String("peerID", types.EncodeHex(p.ID())), zap.Any("Options", peerOptions), zap.Bool("light node", lightNodeEnabled))
 
 	if err := peerOptions.Validate(); err != nil {
 		return fmt.Errorf("p [%x]: sent invalid options: %v", p.ID(), err)

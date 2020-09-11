@@ -173,6 +173,10 @@ func (p *Peer) EnodeID() enode.ID {
 	return p.p2pPeer.ID()
 }
 
+func (p *Peer) Name() string {
+	return p.p2pPeer.Name()
+}
+
 func (p *Peer) IP() net.IP {
 	return p.p2pPeer.Node().IP()
 }

@@ -2,7 +2,7 @@ package wallet
 
 import (
 	"context"
-	"math/big"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"sync"
 	"time"
 
@@ -14,11 +14,11 @@ import (
 )
 
 // GetTokensBalances takes list of accounts and tokens and returns mapping of token balances for each account.
-func GetTokensBalances(parent context.Context, client *ethclient.Client, accounts, tokens []common.Address) (map[common.Address]map[common.Address]*big.Int, error) {
+func GetTokensBalances(parent context.Context, client *ethclient.Client, accounts, tokens []common.Address) (map[common.Address]map[common.Address]*hexutil.Big, error) {
 	var (
 		group    = NewAtomicGroup(parent)
 		mu       sync.Mutex
-		response = map[common.Address]map[common.Address]*big.Int{}
+		response = map[common.Address]map[common.Address]*hexutil.Big{}
 	)
 	// requested current head to request balance on the same block number
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
@@ -48,7 +48,7 @@ func GetTokensBalances(parent context.Context, client *ethclient.Client, account
 				mu.Lock()
 				_, exist := response[account]
 				if !exist {
-					response[account] = map[common.Address]*big.Int{}
+					response[account] = map[common.Address]*hexutil.Big{}
 				}
 				response[account][token] = balance
 				mu.Unlock()

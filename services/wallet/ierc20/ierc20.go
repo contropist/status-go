@@ -4,6 +4,7 @@
 package ierc20
 
 import (
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"math/big"
 	"strings"
 
@@ -217,9 +218,9 @@ func (_IERC20 *IERC20CallerSession) Allowance(owner common.Address, spender comm
 // BalanceOf is a free data retrieval call binding the contract method 0x70a08231.
 //
 // Solidity: function balanceOf(address account) constant returns(uint256)
-func (_IERC20 *IERC20Caller) BalanceOf(opts *bind.CallOpts, account common.Address) (*big.Int, error) {
+func (_IERC20 *IERC20Caller) BalanceOf(opts *bind.CallOpts, account common.Address) (*hexutil.Big, error) {
 	var (
-		ret0 = new(*big.Int)
+		ret0 = new(*hexutil.Big)
 	)
 	out := ret0
 	err := _IERC20.contract.Call(opts, out, "balanceOf", account)
@@ -229,14 +230,14 @@ func (_IERC20 *IERC20Caller) BalanceOf(opts *bind.CallOpts, account common.Addre
 // BalanceOf is a free data retrieval call binding the contract method 0x70a08231.
 //
 // Solidity: function balanceOf(address account) constant returns(uint256)
-func (_IERC20 *IERC20Session) BalanceOf(account common.Address) (*big.Int, error) {
+func (_IERC20 *IERC20Session) BalanceOf(account common.Address) (*hexutil.Big, error) {
 	return _IERC20.Contract.BalanceOf(&_IERC20.CallOpts, account)
 }
 
 // BalanceOf is a free data retrieval call binding the contract method 0x70a08231.
 //
 // Solidity: function balanceOf(address account) constant returns(uint256)
-func (_IERC20 *IERC20CallerSession) BalanceOf(account common.Address) (*big.Int, error) {
+func (_IERC20 *IERC20CallerSession) BalanceOf(account common.Address) (*hexutil.Big, error) {
 	return _IERC20.Contract.BalanceOf(&_IERC20.CallOpts, account)
 }
 

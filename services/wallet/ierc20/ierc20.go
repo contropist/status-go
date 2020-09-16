@@ -220,11 +220,11 @@ func (_IERC20 *IERC20CallerSession) Allowance(owner common.Address, spender comm
 // Solidity: function balanceOf(address account) constant returns(uint256)
 func (_IERC20 *IERC20Caller) BalanceOf(opts *bind.CallOpts, account common.Address) (*hexutil.Big, error) {
 	var (
-		ret0 = new(*hexutil.Big)
+		ret0 = new(*big.Int)
 	)
 	out := ret0
 	err := _IERC20.contract.Call(opts, out, "balanceOf", account)
-	return *ret0, err
+	return (*hexutil.Big)(*ret0), err
 }
 
 // BalanceOf is a free data retrieval call binding the contract method 0x70a08231.

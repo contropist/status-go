@@ -1,32 +1,16 @@
 import os
-import threading
-from dataclasses import dataclass
-
+import docker
 import pytest as pytest
+
+from dataclasses import dataclass
 
 
 def pytest_addoption(parser):
     parser.addoption(
-        "--rpc_url_statusd",
+        "--status_backend_url",
         action="store",
         help="",
-        default="http://0.0.0.0:3333",
-    )
-    parser.addoption(
-        "--ws_url_statusd",
-        action="store",
-        help="",
-        default="ws://0.0.0.0:8354",
-    )
-    parser.addoption(
-        "--status_backend_urls",
-        action="store",
-        help="",
-        default=[
-            f"http://0.0.0.0:{3314 + i}" for i in range(
-                int(os.getenv("STATUS_BACKEND_COUNT", 10))
-            )
-        ],
+        default=None,
     )
     parser.addoption(
         "--anvil_url",
@@ -40,6 +24,24 @@ def pytest_addoption(parser):
         help="",
         default="Strong12345",
     )
+    parser.addoption(
+        "--docker_project_name",
+        action="store",
+        help="",
+        default="tests-functional",
+    )
+    parser.addoption(
+        "--codecov_dir",
+        action="store",
+        help="",
+        default=None,
+    )
+    parser.addoption(
+        "--user_dir",
+        action="store",
+        help="",
+        default=None,
+    )
 
 @dataclass
 class Option:
@@ -52,6 +54,24 @@ option = Option()
 def pytest_configure(config):
     global option
     option = config.option
-    if type(option.status_backend_urls) is str:
-        option.status_backend_urls = option.status_backend_urls.split(",")
+
+    executor_number = int(os.getenv('EXECUTOR_NUMBER', 5))
+    base_port = 7000
+    range_size = 100
+
+    start_port = base_port + (executor_number * range_size)
+
+    option.status_backend_port_range = list(range(start_port, start_port + range_size - 1))
+    option.status_backend_containers = []
+
     option.base_dir = os.path.dirname(os.path.abspath(__file__))
+
+def pytest_unconfigure():
+    docker_client = docker.from_env()
+    for container_id in option.status_backend_containers:
+        try:
+            container = docker_client.containers.get(container_id)
+            container.stop(timeout=30)
+            container.remove()
+        except Exception as e:
+            print(e)

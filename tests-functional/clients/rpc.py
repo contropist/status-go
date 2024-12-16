@@ -17,11 +17,9 @@ class RpcClient:
         try:
             return response.json()[key]
         except json.JSONDecodeError:
-            raise AssertionError(
-                f"Invalid JSON in response: {response.content}")
+            raise AssertionError(f"Invalid JSON in response: {response.content}")
         except KeyError:
-            raise AssertionError(
-                f"Key '{key}' not found in the JSON response: {response.content}")
+            raise AssertionError(f"Key '{key}' not found in the JSON response: {response.content}")
 
     def verify_is_valid_json_rpc_response(self, response, _id=None):
         assert response.status_code == 200, f"Got response {response.content}, status code {response.status_code}"
@@ -31,9 +29,7 @@ class RpcClient:
         if _id:
             try:
                 if _id != response.json()["id"]:
-                    raise AssertionError(
-                        f"got id: {response.json()['id']} instead of expected id: {_id}"
-                    )
+                    raise AssertionError(f"got id: {response.json()['id']} instead of expected id: {_id}")
             except KeyError:
                 raise AssertionError(f"no id in response {response.json()}")
         return response
@@ -44,7 +40,9 @@ class RpcClient:
         self._check_decode_and_key_errors_in_response(response, "error")
 
     @retry(stop=stop_after_delay(10), wait=wait_fixed(0.5), reraise=True)
-    def rpc_request(self, method, params=None, request_id=13, url=None):
+    def rpc_request(self, method, params=None, request_id=None, url=None):
+        if not request_id:
+            request_id = 13
         if params is None:
             params = []
         url = url if url else self.rpc_url
@@ -69,5 +67,4 @@ class RpcClient:
 
     def verify_json_schema(self, response, method):
         with open(f"{option.base_dir}/schemas/{method}", "r") as schema:
-            jsonschema.validate(instance=response,
-                                schema=json.load(schema))
+            jsonschema.validate(instance=response, schema=json.load(schema))

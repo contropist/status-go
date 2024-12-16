@@ -1,8 +1,8 @@
 import os
 import docker
-import pytest as pytest
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 
 
 def pytest_addoption(parser):
@@ -43,9 +43,12 @@ def pytest_addoption(parser):
         default=None,
     )
 
+
 @dataclass
 class Option:
-    pass
+    status_backend_port_range: List[int] = field(default_factory=list)
+    status_backend_containers: List[str] = field(default_factory=list)
+    base_dir: str = ""
 
 
 option = Option()
@@ -55,7 +58,7 @@ def pytest_configure(config):
     global option
     option = config.option
 
-    executor_number = int(os.getenv('EXECUTOR_NUMBER', 5))
+    executor_number = int(os.getenv("EXECUTOR_NUMBER", 5))
     base_port = 7000
     range_size = 100
 
@@ -65,6 +68,7 @@ def pytest_configure(config):
     option.status_backend_containers = []
 
     option.base_dir = os.path.dirname(os.path.abspath(__file__))
+
 
 def pytest_unconfigure():
     docker_client = docker.from_env()

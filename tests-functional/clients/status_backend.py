@@ -14,6 +14,8 @@ from datetime import datetime
 from conftest import option
 from resources.constants import user_1, DEFAULT_DISPLAY_NAME, USER_DIR
 
+NANOSECONDS_PER_SECOND = 1_000_000_000
+
 
 class StatusBackend(RpcClient, SignalClient):
 
@@ -29,6 +31,7 @@ class StatusBackend(RpcClient, SignalClient):
             url = f"http://127.0.0.1:{host_port}"
             option.status_backend_port_range.remove(host_port)
 
+        self.base_url = url
         self.api_url = f"{url}/statusgo"
         self.ws_url = f"{url}".replace("http", "ws")
         self.rpc_url = f"{url}/statusgo/CallRPC"
@@ -36,7 +39,7 @@ class StatusBackend(RpcClient, SignalClient):
         RpcClient.__init__(self, self.rpc_url)
         SignalClient.__init__(self, self.ws_url, await_signals)
 
-        self._health_check()
+        self.wait_for_healthy()
 
         websocket_thread = threading.Thread(target=self._connect)
         websocket_thread.daemon = True
@@ -72,7 +75,6 @@ class StatusBackend(RpcClient, SignalClient):
                 }
             },
         }
-
         if "FUNCTIONAL_TESTS_DOCKER_UID" in os.environ:
             container_args["user"] = os.environ["FUNCTIONAL_TESTS_DOCKER_UID"]
 
@@ -84,23 +86,29 @@ class StatusBackend(RpcClient, SignalClient):
         option.status_backend_containers.append(container.id)
         return container
 
-    def _health_check(self):
+    def wait_for_healthy(self, timeout=10):
         start_time = time.time()
-        while True:
+        while time.time() - start_time <= timeout:
             try:
-                self.api_valid_request(method="Fleets", data=[])
-                break
+                self.health(enable_logging=False)
+                logging.info(f"StatusBackend is healthy after {time.time() - start_time} seconds")
+                return
             except Exception as e:
-                if time.time() - start_time > 20:
-                    raise Exception(e)
-                time.sleep(1)
+                time.sleep(0.1)
+        raise TimeoutError(
+            f"StatusBackend was not healthy after {timeout} seconds")
 
-    def api_request(self, method, data, url=None):
+    def health(self, enable_logging=True):
+        return self.api_request("health", data=[], url=self.base_url, enable_logging=enable_logging)
+
+    def api_request(self, method, data, url=None, enable_logging=True):
         url = url if url else self.api_url
         url = f"{url}/{method}"
-        logging.info(f"Sending POST request to url {url} with data: {json.dumps(data, sort_keys=True, indent=4)}")
+        if enable_logging:
+            logging.info(f"Sending POST request to url {url} with data: {json.dumps(data, sort_keys=True, indent=4)}")
         response = requests.post(url, json=data)
-        logging.info(f"Got response: {response.content}")
+        if enable_logging:
+            logging.info(f"Got response: {response.content}")
         return response
 
     def verify_is_valid_api_response(self, response):
@@ -115,8 +123,8 @@ class StatusBackend(RpcClient, SignalClient):
         except KeyError:
             pass
 
-    def api_valid_request(self, method, data):
-        response = self.api_request(method, data)
+    def api_valid_request(self, method, data, url=None):
+        response = self.api_request(method, data, url)
         self.verify_is_valid_api_response(response)
         return response
 

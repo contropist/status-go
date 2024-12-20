@@ -1,6 +1,7 @@
 import io
 import json
 import logging
+import string
 import tarfile
 import tempfile
 import time
@@ -10,12 +11,15 @@ import requests
 import docker
 import docker.errors
 import os
-
-from tenacity import retry, stop_after_delay, wait_fixed
-from clients.signals import SignalClient
+from clients.services.wallet import WalletService
+from clients.services.wakuext import WakuextService
+from clients.services.accounts import AccountService
+from clients.services.settings import SettingsService
+from clients.signals import SignalClient, SignalType
 from clients.rpc import RpcClient
 from conftest import option
 from resources.constants import user_1, DEFAULT_DISPLAY_NAME, USER_DIR
+from docker.errors import APIError
 
 NANOSECONDS_PER_SECOND = 1_000_000_000
 
@@ -24,7 +28,7 @@ class StatusBackend(RpcClient, SignalClient):
 
     container = None
 
-    def __init__(self, await_signals=[]):
+    def __init__(self, await_signals=[], privileged=False):
 
         if option.status_backend_url:
             url = option.status_backend_url
@@ -32,7 +36,7 @@ class StatusBackend(RpcClient, SignalClient):
             self.docker_client = docker.from_env()
             host_port = random.choice(option.status_backend_port_range)
 
-            self.container = self._start_container(host_port)
+            self.container = self._start_container(host_port, privileged)
             url = f"http://127.0.0.1:{host_port}"
             option.status_backend_port_range.remove(host_port)
 
@@ -40,6 +44,7 @@ class StatusBackend(RpcClient, SignalClient):
         self.api_url = f"{url}/statusgo"
         self.ws_url = f"{url}".replace("http", "ws")
         self.rpc_url = f"{url}/statusgo/CallRPC"
+        self.public_key = ""
 
         RpcClient.__init__(self, self.rpc_url)
         SignalClient.__init__(self, self.ws_url, await_signals)
@@ -50,7 +55,12 @@ class StatusBackend(RpcClient, SignalClient):
         websocket_thread.daemon = True
         websocket_thread.start()
 
-    def _start_container(self, host_port):
+        self.wallet_service = WalletService(self)
+        self.wakuext_service = WakuextService(self)
+        self.accounts_service = AccountService(self)
+        self.settings_service = SettingsService(self)
+
+    def _start_container(self, host_port, privileged):
         docker_project_name = option.docker_project_name
 
         timestamp = int(time.time() * 1000)  # Keep in sync with run_functional_tests.sh
@@ -62,6 +72,7 @@ class StatusBackend(RpcClient, SignalClient):
         container_args = {
             "image": image_name,
             "detach": True,
+            "privileged": privileged,
             "name": container_name,
             "labels": {"com.docker.compose.project": docker_project_name},
             "entrypoint": [
@@ -182,21 +193,26 @@ class StatusBackend(RpcClient, SignalClient):
     def create_account_and_login(
         self,
         data_dir=USER_DIR,
-        display_name=DEFAULT_DISPLAY_NAME,
+        display_name=None,
         password=user_1.password,
     ):
+        self.display_name = (
+            display_name if display_name else f"DISP_NAME_{''.join(random.choices(string.ascii_letters + string.digits + '_-', k=10))}"
+        )
         method = "CreateAccountAndLogin"
         data = {
             "rootDataDir": data_dir,
             "kdfIterations": 256000,
-            "displayName": display_name,
+            "displayName": self.display_name,
             "password": password,
             "customizationColor": "primary",
             "logEnabled": True,
             "logLevel": "DEBUG",
         }
         data = self._set_proxy_credentials(data)
-        return self.api_valid_request(method, data)
+        resp = self.api_valid_request(method, data)
+        self.node_login_event = self.find_signal_containing_pattern(SignalType.NODE_LOGIN.value, event_pattern=self.display_name)
+        return resp
 
     def restore_account_and_login(
         self,
@@ -256,72 +272,34 @@ class StatusBackend(RpcClient, SignalClient):
         # ToDo: change this part for waiting for `node.login` signal when websockets are migrated to StatusBackend
         while time.time() - start_time <= timeout:
             try:
-                self.rpc_valid_request(method="accounts_getKeypairs")
+                self.accounts_service.get_account_keypairs()
                 return
             except AssertionError:
                 time.sleep(3)
         raise TimeoutError(f"RPC client was not started after {timeout} seconds")
 
-    @retry(stop=stop_after_delay(10), wait=wait_fixed(0.5), reraise=True)
-    def start_messenger(self, params=[]):
-        method = "wakuext_startMessenger"
-        response = self.rpc_request(method, params)
-        json_response = response.json()
+    def container_pause(self):
+        if not self.container:
+            raise RuntimeError("Container is not initialized.")
+        self.container.pause()
+        logging.info(f"Container {self.container.name} paused.")
 
-        if "error" in json_response:
-            assert json_response["error"]["code"] == -32000
-            assert json_response["error"]["message"] == "messenger already started"
-            return
+    def container_unpause(self):
+        if not self.container:
+            raise RuntimeError("Container is not initialized.")
+        self.container.unpause()
+        logging.info(f"Container {self.container.name} unpaused.")
 
-        self.verify_is_valid_json_rpc_response(response)
+    def container_exec(self, command):
+        if not self.container:
+            raise RuntimeError("Container is not initialized.")
+        try:
+            exec_result = self.container.exec_run(cmd=["sh", "-c", command], stdout=True, stderr=True, tty=False)
+            if exec_result.exit_code != 0:
+                raise RuntimeError(f"Failed to execute command in container {self.container.id}:\n" f"OUTPUT: {exec_result.output.decode().strip()}")
+            return exec_result.output.decode().strip()
+        except APIError as e:
+            raise RuntimeError(f"API error during container execution: {str(e)}") from e
 
-    def start_wallet(self, params=[]):
-        method = "wallet_startWallet"
-        response = self.rpc_request(method, params)
-        self.verify_is_valid_json_rpc_response(response)
-
-    def get_settings(self, params=[]):
-        method = "settings_getSettings"
-        response = self.rpc_request(method, params)
-        self.verify_is_valid_json_rpc_response(response)
-
-    def get_accounts(self, params=[]):
-        method = "accounts_getAccounts"
-        response = self.rpc_request(method, params)
-        self.verify_is_valid_json_rpc_response(response)
-        return response.json()
-
-    def get_pubkey(self, display_name):
-        response = self.get_accounts()
-        accounts = response.get("result", [])
-        for account in accounts:
-            if account.get("name") == display_name:
-                return account.get("public-key")
-        raise ValueError(f"Public key not found for display name: {display_name}")
-
-    def send_contact_request(self, contact_id: str, message: str):
-        method = "wakuext_sendContactRequest"
-        params = [{"id": contact_id, "message": message}]
-        response = self.rpc_request(method, params)
-        self.verify_is_valid_json_rpc_response(response)
-        return response.json()
-
-    def accept_contact_request(self, chat_id: str):
-        method = "wakuext_acceptContactRequest"
-        params = [{"id": chat_id}]
-        response = self.rpc_request(method, params)
-        self.verify_is_valid_json_rpc_response(response)
-        return response.json()
-
-    def get_contacts(self):
-        method = "wakuext_contacts"
-        response = self.rpc_request(method)
-        self.verify_is_valid_json_rpc_response(response)
-        return response.json()
-
-    def send_message(self, contact_id: str, message: str):
-        method = "wakuext_sendOneToOneMessage"
-        params = [{"id": contact_id, "message": message}]
-        response = self.rpc_request(method, params)
-        self.verify_is_valid_json_rpc_response(response)
-        return response.json()
+    def find_public_key(self):
+        self.public_key = self.node_login_event.get("event", {}).get("settings", {}).get("public-key")

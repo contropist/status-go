@@ -11,14 +11,15 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
+	"go.uber.org/zap"
 
 	"github.com/status-im/status-go/account"
+	"github.com/status-im/status-go/logutils"
 	"github.com/status-im/status-go/services/browsers"
 	"github.com/status-im/status-go/services/wallet"
 	"github.com/status-im/status-go/services/wallet/bigint"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/rlp"
 
@@ -42,7 +43,6 @@ import (
 	"github.com/status-im/status-go/protocol/pushnotificationclient"
 	"github.com/status-im/status-go/protocol/requests"
 	"github.com/status-im/status-go/protocol/transport"
-	"github.com/status-im/status-go/protocol/urls"
 	"github.com/status-im/status-go/protocol/verification"
 	"github.com/status-im/status-go/services/ext/mailservers"
 )
@@ -155,7 +155,7 @@ type MessagesResponse struct {
 type PublicAPI struct {
 	service  *Service
 	eventSub mailservers.EnvelopeEventSubscriber
-	log      log.Logger
+	logger   *zap.Logger
 }
 
 // NewPublicAPI returns instance of the public API.
@@ -163,7 +163,7 @@ func NewPublicAPI(s *Service, eventSub mailservers.EnvelopeEventSubscriber) *Pub
 	return &PublicAPI{
 		service:  s,
 		eventSub: eventSub,
-		log:      log.New("package", "status-go/services/sshext.PublicAPI"),
+		logger:   logutils.ZapLogger().Named("sshextService"),
 	}
 }
 
@@ -291,8 +291,8 @@ func (api *PublicAPI) Chats(parent context.Context) []*protocol.Chat {
 	return api.service.messenger.Chats()
 }
 
-func (api *PublicAPI) ChatsPreview(parent context.Context) []*protocol.ChatPreview {
-	return api.service.messenger.ChatsPreview()
+func (api *PublicAPI) ChatsPreview(parent context.Context, filterType protocol.ChatPreviewFilterType) []*protocol.ChatPreview {
+	return api.service.messenger.ChatsPreview(filterType)
 }
 
 func (api *PublicAPI) Chat(parent context.Context, chatID string) *protocol.Chat {
@@ -341,15 +341,8 @@ func (api *PublicAPI) UnmuteChat(parent context.Context, chatID string) error {
 }
 
 func (api *PublicAPI) BlockContact(ctx context.Context, contactID string) (*protocol.MessengerResponse, error) {
-	api.log.Info("blocking contact", "contact", contactID)
+	api.logger.Info("blocking contact", zap.String("contact", contactID))
 	return api.service.messenger.BlockContact(ctx, contactID, false)
-}
-
-// This function is the same as the one above, but used only on the desktop side, since at the end it doesn't set
-// `Added` flag to `false`, but only `Blocked` to `true`
-func (api *PublicAPI) BlockContactDesktop(ctx context.Context, contactID string) (*protocol.MessengerResponse, error) {
-	api.log.Info("blocking contact", "contact", contactID)
-	return api.service.messenger.BlockContactDesktop(ctx, contactID)
 }
 
 func (api *PublicAPI) UnblockContact(parent context.Context, contactID string) (*protocol.MessengerResponse, error) {
@@ -374,7 +367,8 @@ func (api *PublicAPI) RemoveFilters(parent context.Context, chats []*transport.F
 
 // EnableInstallation enables an installation for multi-device sync.
 func (api *PublicAPI) EnableInstallation(installationID string) error {
-	return api.service.messenger.EnableInstallation(installationID)
+	_, err := api.service.messenger.EnableInstallation(installationID)
+	return err
 }
 
 // DisableInstallation disables an installation for multi-device sync.
@@ -729,10 +723,6 @@ type ApplicationStatusUpdatesResponse struct {
 	StatusUpdates []protocol.UserStatus `json:"statusUpdates"`
 }
 
-type ApplicationSwitcherCardsResponse struct {
-	SwitcherCards []protocol.SwitcherCard `json:"switcherCards"`
-}
-
 func (api *PublicAPI) ChatMessages(chatID, cursor string, limit int) (*ApplicationMessagesResponse, error) {
 	messages, cursor, err := api.service.messenger.MessageByChatID(chatID, cursor, limit)
 	if err != nil {
@@ -795,25 +785,6 @@ func (api *PublicAPI) StatusUpdates() (*ApplicationStatusUpdatesResponse, error)
 
 	return &ApplicationStatusUpdatesResponse{
 		StatusUpdates: statusUpdates,
-	}, nil
-}
-
-func (api *PublicAPI) UpsertSwitcherCard(request *requests.UpsertSwitcherCard) error {
-	return api.service.messenger.UpsertSwitcherCard(request)
-}
-
-func (api *PublicAPI) DeleteSwitcherCard(id string) error {
-	return api.service.messenger.DeleteSwitcherCard(id)
-}
-
-func (api *PublicAPI) SwitcherCards() (*ApplicationSwitcherCardsResponse, error) {
-	switcherCards, err := api.service.messenger.SwitcherCards()
-	if err != nil {
-		return nil, err
-	}
-
-	return &ApplicationSwitcherCardsResponse{
-		SwitcherCards: switcherCards,
 	}, nil
 }
 
@@ -1057,15 +1028,20 @@ func (api *PublicAPI) VerifiedUntrustworthy(ctx context.Context, request *reques
 }
 
 func (api *PublicAPI) SendPairInstallation(ctx context.Context) (*protocol.MessengerResponse, error) {
-	return api.service.messenger.SendPairInstallation(ctx, nil)
+	return api.service.messenger.SendPairInstallation(ctx, "", nil)
 }
 
 func (api *PublicAPI) SyncDevices(ctx context.Context, name, picture string) error {
 	return api.service.messenger.SyncDevices(ctx, name, picture, nil)
 }
 
-func (api *PublicAPI) EnableAndSyncInstallation(request *requests.EnableAndSyncInstallation) error {
-	return api.service.messenger.EnableAndSyncInstallation(request)
+// Deprecated: Use EnableInstallationAndSync instead
+func (api *PublicAPI) EnableAndSyncInstallation(request *requests.EnableInstallationAndSync) (*protocol.MessengerResponse, error) {
+	return api.service.messenger.EnableInstallationAndSync(request)
+}
+
+func (api *PublicAPI) EnableInstallationAndSync(request *requests.EnableInstallationAndSync) (*protocol.MessengerResponse, error) {
+	return api.service.messenger.EnableInstallationAndSync(request)
 }
 
 func (api *PublicAPI) EnableInstallationAndPair(request *requests.EnableInstallationAndPair) (*protocol.MessengerResponse, error) {
@@ -1262,14 +1238,6 @@ func (api *PublicAPI) EmojiReactionsByChatIDMessageID(chatID string, messageID s
 	return api.service.messenger.EmojiReactionsByChatIDMessageID(chatID, messageID)
 }
 
-func (api *PublicAPI) GetLinkPreviewWhitelist() []urls.Site {
-	return urls.LinkPreviewWhitelist()
-}
-
-func (api *PublicAPI) GetLinkPreviewData(link string) (previewData urls.LinkPreviewData, err error) {
-	return urls.GetLinkPreviewData(link)
-}
-
 // GetTextURLsToUnfurl parses text and returns a deduplicated and (somewhat) normalized
 // slice of URLs. The returned URLs can be used as cache keys by clients.
 // For each URL there's a corresponding metadata which should be used as to plan the unfurling.
@@ -1409,10 +1377,6 @@ func (api *PublicAPI) RequestAllHistoricMessages(forceFetchingBackup bool) (*pro
 
 func (api *PublicAPI) RequestAllHistoricMessagesWithRetries(forceFetchingBackup bool) (*protocol.MessengerResponse, error) {
 	return api.service.messenger.RequestAllHistoricMessages(forceFetchingBackup, true)
-}
-
-func (api *PublicAPI) DisconnectActiveMailserver() {
-	api.service.messenger.DisconnectActiveMailserver()
 }
 
 // Echo is a method for testing purposes.
@@ -1714,8 +1678,8 @@ func (api *PublicAPI) ChatMentionReplaceWithPublicKey(chatID, text string) (stri
 // 2. user input "c", call this function with text "abc"
 // whatever, we should ensure ChatMentionOnChangeText know(invoked) the latest full text.
 // ChatMentionOnChangeText will maintain state of fulltext and diff between previous/latest full text internally.
-func (api *PublicAPI) ChatMentionOnChangeText(chatID, text string) (*protocol.ChatMentionContext, error) {
-	return api.service.messenger.GetMentionsManager().OnChangeText(chatID, text)
+func (api *PublicAPI) ChatMentionOnChangeText(chatID, text string, callID uint64) (*protocol.ChatMentionContext, error) {
+	return api.service.messenger.GetMentionsManager().OnChangeText(chatID, text, callID)
 }
 
 // ChatMentionSelectMention select mention from mention suggestion list
@@ -1837,8 +1801,26 @@ func (api *PublicAPI) SetLogLevel(request *requests.SetLogLevel) error {
 	return api.service.messenger.SetLogLevel(request)
 }
 
+func (api *PublicAPI) SetLogNamespaces(request *requests.SetLogNamespaces) error {
+	return api.service.messenger.SetLogNamespaces(request)
+}
+
 func (api *PublicAPI) SetMaxLogBackups(request *requests.SetMaxLogBackups) error {
 	return api.service.messenger.SetMaxLogBackups(request)
+}
+
+func (api *PublicAPI) LogTest() error {
+	l1 := logutils.ZapLogger().Named("test1")
+	l2 := l1.Named("test2")
+	l3 := l2.Named("test3")
+
+	for level := zap.DebugLevel; level <= zap.ErrorLevel; level++ {
+		for _, logger := range []*zap.Logger{l1, l2, l3} {
+			logger.Check(level, "test message").Write(zap.String("level", level.String()))
+		}
+	}
+
+	return l1.Sync()
 }
 
 func (api *PublicAPI) SetCustomNodes(request *requests.SetCustomNodes) error {

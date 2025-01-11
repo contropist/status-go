@@ -1,5 +1,7 @@
 package token
 
+//go:generate mockgen -source=token.go -destination=mock/token/tokenmanager.go
+
 import (
 	"context"
 	"database/sql"
@@ -12,14 +14,17 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/event"
-	"github.com/ethereum/go-ethereum/log"
+	gocommon "github.com/status-im/status-go/common"
 	"github.com/status-im/status-go/contracts"
 	"github.com/status-im/status-go/contracts/community-tokens/assets"
 	eth_node_types "github.com/status-im/status-go/eth-node/types"
+	"github.com/status-im/status-go/logutils"
 	"github.com/status-im/status-go/multiaccounts/accounts"
 	"github.com/status-im/status-go/params"
 	"github.com/status-im/status-go/protocol/communities/token"
@@ -355,7 +360,10 @@ func (tm *Manager) FindOrCreateTokenByAddress(ctx context.Context, chainID uint6
 }
 
 func (tm *Manager) MarkAsPreviouslyOwnedToken(token *Token, owner common.Address) (bool, error) {
-	log.Info("Marking token as previously owned", "token", token, "owner", owner)
+	logutils.ZapLogger().Info("Marking token as previously owned",
+		zap.Any("token", token),
+		zap.Stringer("owner", owner),
+	)
 	if token == nil {
 		return false, errors.New("token is nil")
 	}
@@ -373,7 +381,10 @@ func (tm *Manager) MarkAsPreviouslyOwnedToken(token *Token, owner common.Address
 	} else {
 		for _, t := range tokens[owner] {
 			if t.Address == token.Address && t.ChainID == token.ChainID && t.Symbol == token.Symbol {
-				log.Info("Token already marked as previously owned", "token", token, "owner", owner)
+				logutils.ZapLogger().Info("Token already marked as previously owned",
+					zap.Any("token", token),
+					zap.Stringer("owner", owner),
+				)
 				return false, nil
 			}
 		}
@@ -423,7 +434,7 @@ func (tm *Manager) discoverTokenCommunityID(ctx context.Context, token *Token, a
 
 	update, err := tm.db.Prepare("UPDATE tokens SET community_id=? WHERE network_id=? AND address=?")
 	if err != nil {
-		log.Error("Cannot prepare token update query", err)
+		logutils.ZapLogger().Error("Cannot prepare token update query", zap.Error(err))
 		return
 	}
 
@@ -431,7 +442,7 @@ func (tm *Manager) discoverTokenCommunityID(ctx context.Context, token *Token, a
 		// Update token community ID to prevent further checks
 		_, err := update.Exec("", token.ChainID, token.Address)
 		if err != nil {
-			log.Error("Cannot update community id", err)
+			logutils.ZapLogger().Error("Cannot update community id", zap.Error(err))
 		}
 		return
 	}
@@ -449,7 +460,7 @@ func (tm *Manager) discoverTokenCommunityID(ctx context.Context, token *Token, a
 
 	_, err = update.Exec(communityID, token.ChainID, token.Address)
 	if err != nil {
-		log.Error("Cannot update community id", err)
+		logutils.ZapLogger().Error("Cannot update community id", zap.Error(err))
 	}
 }
 
@@ -485,7 +496,7 @@ func (tm *Manager) getNativeTokens() ([]*Token, error) {
 func (tm *Manager) GetAllTokens() ([]*Token, error) {
 	allTokens, err := tm.GetCustoms(true)
 	if err != nil {
-		log.Error("can't fetch custom tokens", "error", err)
+		logutils.ZapLogger().Error("can't fetch custom tokens", zap.Error(err))
 	}
 
 	allTokens = append(tm.getTokens(), allTokens...)
@@ -690,6 +701,7 @@ func (tm *Manager) DeleteCustom(chainID uint64, address common.Address) error {
 }
 
 func (tm *Manager) SignalCommunityTokenReceived(address common.Address, txHash common.Hash, value *big.Int, t *Token, isFirst bool) {
+	defer gocommon.LogOnPanic()
 	if tm.walletFeed == nil || t == nil || t.CommunityData == nil {
 		return
 	}
@@ -786,7 +798,7 @@ func (tm *Manager) onAccountsChange(changedAddresses []common.Address, eventType
 		for _, account := range changedAddresses {
 			err := tm.removeTokenBalances(account)
 			if err != nil {
-				log.Error("token.Manager: can't remove token balances", "error", err)
+				logutils.ZapLogger().Error("token.Manager: can't remove token balances", zap.Error(err))
 			}
 		}
 	}

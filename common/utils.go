@@ -7,7 +7,11 @@ import (
 	"regexp"
 	"strings"
 
+	"go.uber.org/zap"
+
 	"github.com/status-im/status-go/eth-node/crypto"
+	"github.com/status-im/status-go/internal/sentry"
+	"github.com/status-im/status-go/logutils"
 	"github.com/status-im/status-go/protocol/identity/alias"
 	"github.com/status-im/status-go/protocol/protobuf"
 )
@@ -83,4 +87,19 @@ func IsNil(i interface{}) bool {
 		return reflect.ValueOf(i).IsNil()
 	}
 	return false
+}
+
+func LogOnPanic() {
+	err := recover()
+	if err == nil {
+		return
+	}
+
+	logutils.ZapLogger().Error("panic in goroutine",
+		zap.Any("error", err),
+		zap.Stack("stacktrace"))
+
+	sentry.RecoverError(err)
+
+	panic(err)
 }

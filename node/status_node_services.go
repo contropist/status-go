@@ -10,6 +10,8 @@ import (
 	"reflect"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/status-im/status-go/protocol/common/shard"
 	"github.com/status-im/status-go/server"
 	"github.com/status-im/status-go/signal"
@@ -33,12 +35,14 @@ import (
 	"github.com/status-im/status-go/rpc"
 	accountssvc "github.com/status-im/status-go/services/accounts"
 	"github.com/status-im/status-go/services/accounts/settingsevent"
+	appgeneral "github.com/status-im/status-go/services/app-general"
 	appmetricsservice "github.com/status-im/status-go/services/appmetrics"
 	"github.com/status-im/status-go/services/browsers"
 	"github.com/status-im/status-go/services/chat"
 	"github.com/status-im/status-go/services/communitytokens"
 	"github.com/status-im/status-go/services/connector"
 	"github.com/status-im/status-go/services/ens"
+	"github.com/status-im/status-go/services/eth"
 	"github.com/status-im/status-go/services/ext"
 	"github.com/status-im/status-go/services/gif"
 	localnotifications "github.com/status-im/status-go/services/local-notifications"
@@ -73,7 +77,6 @@ var (
 )
 
 func (b *StatusNode) initServices(config *params.NodeConfig, mediaServer *server.MediaServer) error {
-	accountsFeed := &event.Feed{}
 	settingsFeed := &event.Feed{}
 	accDB, err := accounts.NewDB(b.appDB)
 	if err != nil {
@@ -83,10 +86,11 @@ func (b *StatusNode) initServices(config *params.NodeConfig, mediaServer *server
 	setSettingsNotifier(accDB, settingsFeed)
 
 	services := []common.StatusService{}
-	services = appendIf(config.UpstreamConfig.Enabled, services, b.rpcFiltersService())
+	services = append(services, b.rpcFiltersService())
 	services = append(services, b.subscriptionService())
 	services = append(services, b.rpcStatsService())
 	services = append(services, b.appmetricsService())
+	services = append(services, b.appgeneralService())
 	services = append(services, b.peerService())
 	services = append(services, b.personalService())
 	services = append(services, b.statusPublicService())
@@ -95,7 +99,7 @@ func (b *StatusNode) initServices(config *params.NodeConfig, mediaServer *server
 	services = append(services, b.CommunityTokensService())
 	services = append(services, b.stickersService(accDB))
 	services = append(services, b.updatesService())
-	services = appendIf(b.appDB != nil && b.multiaccountsDB != nil, services, b.accountsService(accountsFeed, accDB, mediaServer))
+	services = appendIf(b.appDB != nil && b.multiaccountsDB != nil, services, b.accountsService(&b.accountsFeed, accDB, mediaServer))
 	services = appendIf(config.BrowsersConfig.Enabled, services, b.browsersService())
 	services = appendIf(config.PermissionsConfig.Enabled, services, b.permissionsService())
 	services = appendIf(config.MailserversConfig.Enabled, services, b.mailserversService())
@@ -107,7 +111,7 @@ func (b *StatusNode) initServices(config *params.NodeConfig, mediaServer *server
 	// Wallet Service is used by wakuExtSrvc/wakuV2ExtSrvc
 	// Keep this initialization before the other two
 	if config.WalletConfig.Enabled {
-		walletService := b.walletService(accDB, b.appDB, accountsFeed, settingsFeed, &b.walletFeed, config.WalletConfig.StatusProxyStageName)
+		walletService := b.walletService(accDB, b.appDB, &b.accountsFeed, settingsFeed, &b.walletFeed, config.WalletConfig.StatusProxyStageName)
 		services = append(services, walletService)
 	}
 
@@ -172,6 +176,8 @@ func (b *StatusNode) initServices(config *params.NodeConfig, mediaServer *server
 		return err
 	}
 	services = append(services, lns)
+
+	services = append(services, b.ethService())
 
 	b.peerSrvc.SetDiscoverer(b)
 
@@ -562,8 +568,19 @@ func (b *StatusNode) appmetricsService() common.StatusService {
 	return b.appMetricsSrvc
 }
 
+func (b *StatusNode) appgeneralService() *appgeneral.Service {
+	if b.appGeneralSrvc == nil {
+		b.appGeneralSrvc = appgeneral.New()
+	}
+	return b.appGeneralSrvc
+}
+
 func (b *StatusNode) WalletService() *wallet.Service {
 	return b.walletSrvc
+}
+
+func (b *StatusNode) AccountsFeed() *event.Feed {
+	return &b.accountsFeed
 }
 
 func (b *StatusNode) SetWalletCommunityInfoProvider(provider thirdparty.CommunityInfoProvider) {
@@ -576,8 +593,7 @@ func (b *StatusNode) walletService(accountsDB *accounts.Database, appDB *sql.DB,
 	if b.walletSrvc == nil {
 		b.walletSrvc = wallet.NewService(
 			b.walletDB, accountsDB, appDB, b.rpcClient, accountsFeed, settingsFeed, b.gethAccountManager, b.transactor, b.config,
-			b.ensService(b.timeSourceNow()),
-			b.stickersService(accountsDB),
+			b.ensService(b.timeSourceNow()).API().EnsResolver(),
 			b.pendingTracker,
 			walletFeed,
 			b.httpServer,
@@ -603,6 +619,13 @@ func (b *StatusNode) peerService() *peer.Service {
 		b.peerSrvc = peer.New()
 	}
 	return b.peerSrvc
+}
+
+func (b *StatusNode) ethService() *eth.Service {
+	if b.ethSrvc == nil {
+		b.ethSrvc = eth.NewService(b.rpcClient)
+	}
+	return b.ethSrvc
 }
 
 func registerWakuMailServer(wakuService *waku.Waku, config *params.WakuConfig) (err error) {
@@ -635,7 +658,7 @@ func (b *StatusNode) StopLocalNotifications() error {
 	if b.localNotificationsSrvc.IsStarted() {
 		err := b.localNotificationsSrvc.Stop()
 		if err != nil {
-			b.log.Error("LocalNotifications service stop failed on StopLocalNotifications", "error", err)
+			b.logger.Error("LocalNotifications service stop failed on StopLocalNotifications", zap.Error(err))
 			return nil
 		}
 	}
@@ -656,7 +679,7 @@ func (b *StatusNode) StartLocalNotifications() error {
 		err := b.localNotificationsSrvc.Start()
 
 		if err != nil {
-			b.log.Error("LocalNotifications service start failed on StartLocalNotifications", "error", err)
+			b.logger.Error("LocalNotifications service start failed on StartLocalNotifications", zap.Error(err))
 			return nil
 		}
 	}
@@ -664,7 +687,7 @@ func (b *StatusNode) StartLocalNotifications() error {
 	err := b.localNotificationsSrvc.SubscribeWallet(&b.walletFeed)
 
 	if err != nil {
-		b.log.Error("LocalNotifications service could not subscribe to wallet on StartLocalNotifications", "error", err)
+		b.logger.Error("LocalNotifications service could not subscribe to wallet on StartLocalNotifications", zap.Error(err))
 		return nil
 	}
 

@@ -27,11 +27,13 @@ const (
 	shardsTestClusterID      = 16
 	walletAccountDefaultName = "Account 1"
 
-	DefaultKeystoreRelativePath       = "keystore"
-	DefaultKeycardPairingDataFile     = "/ethereum/mainnet_rpc/keycard/pairings.json"
-	DefaultDataDir                    = "/ethereum/mainnet_rpc"
-	DefaultNodeName                   = "StatusIM"
-	DefaultLogFile                    = "geth.log"
+	DefaultKeystoreRelativePath   = "keystore"
+	DefaultKeycardPairingDataFile = "/ethereum/mainnet_rpc/keycard/pairings.json"
+	DefaultDataDir                = "/ethereum/mainnet_rpc"
+	DefaultNodeName               = "StatusIM"
+	DefaultLogFile                = "geth.log"
+	DefaultAPILogFile             = "api.log"
+
 	DefaultLogLevel                   = "ERROR"
 	DefaultMaxPeers                   = 20
 	DefaultMaxPendingPeers            = 20
@@ -196,31 +198,22 @@ func buildWalletConfig(request *requests.WalletSecretsConfig, statusProxyEnabled
 	}
 
 	if request.AlchemyEthereumMainnetToken != "" {
-		walletConfig.AlchemyAPIKeys[mainnetChainID] = request.AlchemyEthereumMainnetToken
-	}
-	if request.AlchemyEthereumGoerliToken != "" {
-		walletConfig.AlchemyAPIKeys[goerliChainID] = request.AlchemyEthereumGoerliToken
+		walletConfig.AlchemyAPIKeys[MainnetChainID] = request.AlchemyEthereumMainnetToken
 	}
 	if request.AlchemyEthereumSepoliaToken != "" {
-		walletConfig.AlchemyAPIKeys[sepoliaChainID] = request.AlchemyEthereumSepoliaToken
+		walletConfig.AlchemyAPIKeys[SepoliaChainID] = request.AlchemyEthereumSepoliaToken
 	}
 	if request.AlchemyArbitrumMainnetToken != "" {
-		walletConfig.AlchemyAPIKeys[arbitrumChainID] = request.AlchemyArbitrumMainnetToken
-	}
-	if request.AlchemyArbitrumGoerliToken != "" {
-		walletConfig.AlchemyAPIKeys[arbitrumGoerliChainID] = request.AlchemyArbitrumGoerliToken
+		walletConfig.AlchemyAPIKeys[ArbitrumChainID] = request.AlchemyArbitrumMainnetToken
 	}
 	if request.AlchemyArbitrumSepoliaToken != "" {
-		walletConfig.AlchemyAPIKeys[arbitrumSepoliaChainID] = request.AlchemyArbitrumSepoliaToken
+		walletConfig.AlchemyAPIKeys[ArbitrumSepoliaChainID] = request.AlchemyArbitrumSepoliaToken
 	}
 	if request.AlchemyOptimismMainnetToken != "" {
-		walletConfig.AlchemyAPIKeys[optimismChainID] = request.AlchemyOptimismMainnetToken
-	}
-	if request.AlchemyOptimismGoerliToken != "" {
-		walletConfig.AlchemyAPIKeys[optimismGoerliChainID] = request.AlchemyOptimismGoerliToken
+		walletConfig.AlchemyAPIKeys[OptimismChainID] = request.AlchemyOptimismMainnetToken
 	}
 	if request.AlchemyOptimismSepoliaToken != "" {
-		walletConfig.AlchemyAPIKeys[optimismSepoliaChainID] = request.AlchemyOptimismSepoliaToken
+		walletConfig.AlchemyAPIKeys[OptimismSepoliaChainID] = request.AlchemyOptimismSepoliaToken
 	}
 	if request.StatusProxyMarketUser != "" {
 		walletConfig.StatusProxyMarketUser = request.StatusProxyMarketUser
@@ -286,16 +279,6 @@ func DefaultNodeConfig(installationID string, request *requests.CreateAccount, o
 		nodeConfig.NetworkID = *request.NetworkID
 	} else {
 		nodeConfig.NetworkID = nodeConfig.Networks[0].ChainID
-	}
-
-	if request.UpstreamConfig != "" {
-		nodeConfig.UpstreamConfig = params.UpstreamRPCConfig{
-			Enabled: true,
-			URL:     request.UpstreamConfig,
-		}
-	} else {
-		nodeConfig.UpstreamConfig.URL = mainnet(request.WalletSecretsConfig.StatusProxyStageName).RPCURL
-		nodeConfig.UpstreamConfig.Enabled = true
 	}
 
 	nodeConfig.Name = DefaultNodeName

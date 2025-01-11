@@ -41,10 +41,10 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/p2p"
-	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
 
+	gocommon "github.com/status-im/status-go/common"
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/logutils"
 	"github.com/status-im/status-go/waku/common"
@@ -226,6 +226,7 @@ func (w *Waku) SetMinimumPoW(val float64, tolerate bool) error {
 
 	if tolerate {
 		go func() {
+			defer gocommon.LogOnPanic()
 			// allow some time before all the peers have processed the notification
 			select {
 			case <-w.quit:
@@ -306,6 +307,7 @@ func (w *Waku) SetBloomFilter(bloom []byte) error {
 	w.notifyPeersAboutBloomFilterChange(b)
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		// allow some time before all the peers have processed the notification
 		select {
 		case <-w.quit:
@@ -376,6 +378,7 @@ func (w *Waku) SetTopicInterest(topicInterest []common.TopicType) error {
 	w.notifyPeersAboutTopicInterestChange(topicInterest)
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		// allow some time before all the peers have processed the notification
 		select {
 		case <-w.quit:
@@ -511,6 +514,7 @@ func (w *Waku) RegisterBridge(b Bridge) {
 }
 
 func (w *Waku) readBridgeLoop() {
+	defer gocommon.LogOnPanic()
 	defer w.bridgeWg.Done()
 	out, _ := w.bridge.Pipe()
 	for {
@@ -639,73 +643,6 @@ func (w *Waku) AllowP2PMessagesFromPeer(peerID []byte) error {
 	}
 	p.SetPeerTrusted(true)
 	return nil
-}
-
-// RequestHistoricMessages sends a message with p2pRequestCode to a specific peer,
-// which is known to implement MailServer interface, and is supposed to process this
-// request and respond with a number of peer-to-peer messages (possibly expired),
-// which are not supposed to be forwarded any further.
-// The waku protocol is agnostic of the format and contents of envelope.
-func (w *Waku) RequestHistoricMessages(peerID []byte, envelope *common.Envelope) error {
-	return w.RequestHistoricMessagesWithTimeout(peerID, envelope, 0)
-}
-
-// RequestHistoricMessagesWithTimeout acts as RequestHistoricMessages but requires to pass a timeout.
-// It sends an event EventMailServerRequestExpired after the timeout.
-func (w *Waku) RequestHistoricMessagesWithTimeout(peerID []byte, envelope *common.Envelope, timeout time.Duration) error {
-	p, err := w.getPeer(peerID)
-	if err != nil {
-		return err
-	}
-	p.SetPeerTrusted(true)
-
-	w.envelopeFeed.Send(common.EnvelopeEvent{
-		Peer:  p.EnodeID(),
-		Topic: envelope.Topic,
-		Hash:  envelope.Hash(),
-		Event: common.EventMailServerRequestSent,
-	})
-
-	err = p.RequestHistoricMessages(envelope)
-	if timeout != 0 {
-		go w.expireRequestHistoricMessages(p.EnodeID(), envelope.Hash(), timeout)
-	}
-	return err
-}
-
-func (w *Waku) SendMessagesRequest(peerID []byte, request common.MessagesRequest) error {
-	if err := request.Validate(); err != nil {
-		return err
-	}
-	p, err := w.getPeer(peerID)
-	if err != nil {
-		return err
-	}
-	p.SetPeerTrusted(true)
-	if err := p.SendMessagesRequest(request); err != nil {
-		return err
-	}
-	w.envelopeFeed.Send(common.EnvelopeEvent{
-		Peer:  p.EnodeID(),
-		Hash:  gethcommon.BytesToHash(request.ID),
-		Event: common.EventMailServerRequestSent,
-	})
-	return nil
-}
-
-func (w *Waku) expireRequestHistoricMessages(peer enode.ID, hash gethcommon.Hash, timeout time.Duration) {
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-w.quit:
-		return
-	case <-timer.C:
-		w.envelopeFeed.Send(common.EnvelopeEvent{
-			Peer:  peer,
-			Hash:  hash,
-			Event: common.EventMailServerRequestExpired,
-		})
-	}
 }
 
 func (w *Waku) SendHistoricMessageResponse(peerID []byte, payload []byte) error {
@@ -1442,6 +1379,7 @@ func (w *Waku) postEvent(envelope *common.Envelope, isP2P bool) {
 
 // processQueue delivers the messages to the watchers during the lifetime of the waku node.
 func (w *Waku) processQueue() {
+	defer gocommon.LogOnPanic()
 	for {
 		select {
 		case <-w.quit:
@@ -1458,6 +1396,7 @@ func (w *Waku) processQueue() {
 }
 
 func (w *Waku) processP2P() {
+	defer gocommon.LogOnPanic()
 	for {
 		select {
 		case <-w.quit:
@@ -1495,6 +1434,7 @@ func (w *Waku) processP2P() {
 // update loops until the lifetime of the waku node, updating its internal
 // state by expiring stale messages from the pool.
 func (w *Waku) update() {
+	defer gocommon.LogOnPanic()
 	// Start a ticker to check for expirations
 	expire := time.NewTicker(common.ExpirationCycle)
 

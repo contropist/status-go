@@ -16,12 +16,14 @@ import (
 
 	"github.com/golang/protobuf/proto"
 	"github.com/google/uuid"
+	"github.com/libp2p/go-libp2p/core/peer"
 
 	gethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
 	"go.uber.org/zap"
 
+	gocommon "github.com/status-im/status-go/common"
 	utils "github.com/status-im/status-go/common"
 
 	"github.com/status-im/status-go/account"
@@ -39,6 +41,7 @@ import (
 	"github.com/status-im/status-go/protocol/encryption"
 	"github.com/status-im/status-go/protocol/protobuf"
 	"github.com/status-im/status-go/protocol/requests"
+	"github.com/status-im/status-go/protocol/storenodes"
 	"github.com/status-im/status-go/protocol/transport"
 	v1protocol "github.com/status-im/status-go/protocol/v1"
 	localnotifications "github.com/status-im/status-go/services/local-notifications"
@@ -220,6 +223,7 @@ func (m *Messenger) publishCommunityPrivilegedMemberSyncMessage(msg *communities
 func (m *Messenger) handleCommunitiesHistoryArchivesSubscription(c chan *communities.Subscription) {
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		for {
 			select {
 			case sub, more := <-c:
@@ -382,6 +386,7 @@ func (m *Messenger) handleCommunitiesSubscription(c chan *communities.Subscripti
 	}
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		for {
 			select {
 			case sub, more := <-c:
@@ -504,6 +509,7 @@ func (m *Messenger) updateCommunitiesActiveMembersPeriodically() {
 	ticker := time.NewTicker(5 * time.Minute)
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		for {
 			select {
 			case <-ticker.C:
@@ -822,6 +828,7 @@ func (m *Messenger) schedulePublishGrantsForControlledCommunities() {
 	ticker := time.NewTicker(grantUpdateInterval)
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		for {
 			select {
 			case <-ticker.C:
@@ -838,12 +845,12 @@ func (m *Messenger) CheckCommunitiesToUnmute() (*MessengerResponse, error) {
 	m.logger.Debug("watching communities to unmute")
 	response := &MessengerResponse{}
 	communities, err := m.communitiesManager.All()
+	currTime := time.Now()
 	if err != nil {
 		return nil, fmt.Errorf("couldn't get all communities: %v", err)
 	}
 	for _, community := range communities {
-		communityMuteTill := community.MuteTill().Truncate(time.Second)
-		currTime := time.Now().Truncate(time.Second)
+		communityMuteTill := community.MuteTill()
 
 		if currTime.After(communityMuteTill) && !communityMuteTill.Equal(time.Time{}) && community.Muted() {
 			err := m.communitiesManager.SetMuted(community.ID(), false)
@@ -929,11 +936,7 @@ func (m *Messenger) CommunityUpdateLastOpenedAt(communityID string) (int64, erro
 		return 0, err
 	}
 	currentTime := time.Now().Unix()
-	updatedCommunity, err := m.communitiesManager.CommunityUpdateLastOpenedAt(id, currentTime)
-	if err != nil {
-		return 0, err
-	}
-	err = m.syncCommunity(context.Background(), updatedCommunity, m.dispatchMessage)
+	_, err = m.communitiesManager.CommunityUpdateLastOpenedAt(id, currentTime)
 	if err != nil {
 		return 0, err
 	}
@@ -1206,6 +1209,8 @@ func (m *Messenger) MuteDuration(mutedType requests.MutingVariation) (time.Time,
 		MuteTill = time.Now().Add(MuteFor1HrsDuration)
 	case MuteFor8Hr:
 		MuteTill = time.Now().Add(MuteFor8HrsDuration)
+	case MuteFor24Hr:
+		MuteTill = time.Now().Add(MuteFor24HrsDuration)
 	case MuteFor1Week:
 		MuteTill = time.Now().Add(MuteFor1WeekDuration)
 	default:
@@ -1498,8 +1503,10 @@ func (m *Messenger) RequestToJoinCommunity(request *requests.RequestToJoinCommun
 		return nil, err
 	}
 
-	if _, err = m.AddRawMessageToWatch(rawMessage); err != nil {
-		return nil, err
+	if rawMessage.ResendType == common.ResendTypeRawMessage {
+		if _, err = m.AddRawMessageToWatch(rawMessage); err != nil {
+			return nil, err
+		}
 	}
 
 	if !community.AutoAccept() {
@@ -1514,6 +1521,9 @@ func (m *Messenger) RequestToJoinCommunity(request *requests.RequestToJoinCommun
 		privMembersArray = append(privMembersArray, privilegedMembersSorted[protobuf.CommunityMember_ROLE_ADMIN]...)
 
 		rawMessage.ResendMethod = common.ResendMethodSendPrivate
+		rawMessage.ResendType = common.ResendTypeDataSync
+		// MVDS only supports sending encrypted message
+		rawMessage.SkipEncryptionLayer = false
 		rawMessage.ID = ""
 		rawMessage.Recipients = privMembersArray
 
@@ -1527,14 +1537,9 @@ func (m *Messenger) RequestToJoinCommunity(request *requests.RequestToJoinCommun
 		rawMessage.Payload = payload
 
 		for _, member := range rawMessage.Recipients {
+			rawMessage.Sender = nil
 			_, err := m.sender.SendPrivate(context.Background(), member, rawMessage)
 			if err != nil {
-				return nil, err
-			}
-		}
-
-		if len(rawMessage.Recipients) > 0 {
-			if _, err = m.AddRawMessageToWatch(rawMessage); err != nil {
 				return nil, err
 			}
 		}
@@ -1546,6 +1551,7 @@ func (m *Messenger) RequestToJoinCommunity(request *requests.RequestToJoinCommun
 
 	// We send a push notification in the background
 	go func() {
+		defer gocommon.LogOnPanic()
 		if m.pushNotificationClient != nil {
 			pks, err := community.CanManageUsersPublicKeys()
 			if err != nil {
@@ -1951,6 +1957,10 @@ func (m *Messenger) CancelRequestToJoinCommunity(ctx context.Context, request *r
 }
 
 func (m *Messenger) acceptRequestToJoinCommunity(requestToJoin *communities.RequestToJoin) (*MessengerResponse, error) {
+	m.logger.Debug("accept request to join community",
+		zap.String("community", requestToJoin.CommunityID.String()),
+		zap.String("pubkey", requestToJoin.PublicKey))
+
 	community, err := m.communitiesManager.AcceptRequestToJoin(requestToJoin)
 	if err != nil {
 		return nil, err
@@ -1981,14 +1991,20 @@ func (m *Messenger) acceptRequestToJoinCommunity(requestToJoin *communities.Requ
 			return nil, err
 		}
 
+		descriptionMessage, err := community.ToProtocolMessageBytes()
+		if err != nil {
+			return nil, err
+		}
+
 		requestToJoinResponseProto := &protobuf.CommunityRequestToJoinResponse{
-			Clock:                    community.Clock(),
-			Accepted:                 true,
-			CommunityId:              community.ID(),
-			Community:                encryptedDescription,
-			Grant:                    grant,
-			ProtectedTopicPrivateKey: crypto.FromECDSA(key),
-			Shard:                    community.Shard().Protobuffer(),
+			Clock:                               community.Clock(),
+			Accepted:                            true,
+			CommunityId:                         community.ID(),
+			Community:                           encryptedDescription, // Deprecated but kept for backward compatibility, to be removed in future
+			Grant:                               grant,
+			ProtectedTopicPrivateKey:            crypto.FromECDSA(key),
+			Shard:                               community.Shard().Protobuffer(),
+			CommunityDescriptionProtocolMessage: descriptionMessage,
 		}
 
 		// The purpose of this torrent code is to get the 'magnetlink' to populate 'requestToJoinResponseProto.MagnetUri'
@@ -2019,6 +2035,16 @@ func (m *Messenger) acceptRequestToJoinCommunity(requestToJoin *communities.Requ
 			Priority:            &common.HighPriority,
 		}
 
+		// Non-tokenized community treat community public key as the control node,
+		// tokenized community set control node to the public key of token owner.
+		// MVDS doesn't support custom sender, and use the identity key for signing messages,
+		// receiver will verify the message of community join response is signed by control node.
+		if !community.PublicKey().Equal(community.ControlNode()) {
+			rawMessage.ResendType = common.ResendTypeDataSync
+			rawMessage.SkipEncryptionLayer = false
+			rawMessage.Sender = nil
+		}
+
 		if community.Encrypted() {
 			rawMessage.HashRatchetGroupID = community.ID()
 			rawMessage.CommunityKeyExMsgType = common.KeyExMsgReuse
@@ -2029,8 +2055,10 @@ func (m *Messenger) acceptRequestToJoinCommunity(requestToJoin *communities.Requ
 			return nil, err
 		}
 
-		if _, err = m.AddRawMessageToWatch(rawMessage); err != nil {
-			return nil, err
+		if rawMessage.ResendType == common.ResendTypeRawMessage {
+			if _, err = m.AddRawMessageToWatch(rawMessage); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -3265,7 +3293,7 @@ func (m *Messenger) FetchCommunity(request *FetchCommunityRequest) (*communities
 		WithWaitForResponseOption(request.WaitForResponse),
 	}
 
-	community, _, err := m.storeNodeRequestsManager.FetchCommunity(communityAddress, options)
+	community, _, err := m.storeNodeRequestsManager.FetchCommunity(m.ctx, communityAddress, options)
 
 	return community, err
 }
@@ -3273,7 +3301,7 @@ func (m *Messenger) FetchCommunity(request *FetchCommunityRequest) (*communities
 // fetchCommunities installs filter for community and requests its details from store node.
 // When response received it will be passed through signals handler.
 func (m *Messenger) fetchCommunities(communities []communities.CommunityShard) error {
-	return m.storeNodeRequestsManager.FetchCommunities(communities, []StoreNodeRequestOption{})
+	return m.storeNodeRequestsManager.FetchCommunities(m.ctx, communities, []StoreNodeRequestOption{})
 }
 
 // passStoredCommunityInfoToSignalHandler calls signal handler with community info
@@ -3687,10 +3715,10 @@ func (m *Messenger) sendSharedAddressToControlNode(receiver *ecdsa.PublicKey, co
 	rawMessage := common.RawMessage{
 		Payload:             payload,
 		CommunityID:         community.ID(),
-		SkipEncryptionLayer: true,
+		SkipEncryptionLayer: false,
 		MessageType:         protobuf.ApplicationMetadataMessage_COMMUNITY_REQUEST_TO_JOIN,
 		PubsubTopic:         community.PubsubTopic(), // TODO: confirm if it should be sent in community pubsub topic
-		ResendType:          common.ResendTypeRawMessage,
+		ResendType:          common.ResendTypeDataSync,
 		ResendMethod:        common.ResendMethodSendPrivate,
 		Recipients:          []*ecdsa.PublicKey{receiver},
 	}
@@ -3703,8 +3731,6 @@ func (m *Messenger) sendSharedAddressToControlNode(receiver *ecdsa.PublicKey, co
 	if err != nil {
 		return nil, err
 	}
-
-	_, err = m.AddRawMessageToWatch(&rawMessage)
 
 	return requestToJoin, err
 }
@@ -3789,7 +3815,7 @@ func (m *Messenger) handleSyncInstallationCommunity(messageState *ReceivedMessag
 	// This is good to do so that we don't have to queue all the actions done after the handled community description.
 	// `signer` is `communityID` for a community with no owner token and `owner public key` otherwise
 	signer, err := utils.RecoverKey(&amm)
-	if err != nil {
+	if signer == nil || err != nil {
 		logger.Debug("failed to recover community description signer", zap.Error(err))
 		return err
 	}
@@ -3884,7 +3910,7 @@ func (m *Messenger) HandleSyncCommunitySettings(messageState *ReceivedMessageSta
 }
 
 func (m *Messenger) InitHistoryArchiveTasks(communities []*communities.Community) {
-
+	defer utils.LogOnPanic()
 	m.logger.Debug("initializing history archive tasks")
 
 	for _, c := range communities {
@@ -3946,8 +3972,8 @@ func (m *Messenger) InitHistoryArchiveTasks(communities []*communities.Community
 			}
 
 			// Request possibly missed waku messages for community
-			ms := m.getActiveMailserver(c.ID().String())
-			_, err = m.syncFiltersFrom(*ms, filters, uint32(latestWakuMessageTimestamp))
+			ms := m.getCommunityStorenode(c.ID().String())
+			_, err = m.syncFiltersFrom(ms, filters, uint32(latestWakuMessageTimestamp))
 			if err != nil {
 				m.logger.Error("failed to request missing messages", zap.Error(err))
 				continue
@@ -4005,6 +4031,7 @@ func (m *Messenger) InitHistoryArchiveTasks(communities []*communities.Community
 
 func (m *Messenger) enableHistoryArchivesImportAfterDelay() {
 	go func() {
+		defer gocommon.LogOnPanic()
 		time.Sleep(importInitialDelay)
 		m.importDelayer.once.Do(func() {
 			close(m.importDelayer.wait)
@@ -4061,6 +4088,7 @@ func (m *Messenger) resumeHistoryArchivesImport(communityID types.HexBytes) erro
 	task.Waiter.Add(1)
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		defer task.Waiter.Done()
 		err := m.importHistoryArchives(communityID, task.CancelChan)
 		if err != nil {
@@ -4085,6 +4113,7 @@ func (m *Messenger) importHistoryArchives(communityID types.HexBytes, cancel cha
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	go func() {
+		defer gocommon.LogOnPanic()
 		<-cancel
 		cancelFunc()
 	}()
@@ -4646,6 +4675,7 @@ func (m *Messenger) startCommunityRekeyLoop() {
 
 	ticker := time.NewTicker(d)
 	go func() {
+		defer gocommon.LogOnPanic()
 		for {
 			select {
 			case <-ticker.C:
@@ -4869,7 +4899,11 @@ func (m *Messenger) CreateResponseWithACNotification(communityID string, acType 
 // use pointer to rawMessage to get the message ID and other updated properties.
 func (m *Messenger) SendMessageToControlNode(community *communities.Community, rawMessage *common.RawMessage) ([]byte, error) {
 	if !community.PublicKey().Equal(community.ControlNode()) {
+		m.logger.Debug("control node is different with community pubkey", zap.Any("control:", community.ControlNode()), zap.Any("communityPubkey:", community.PublicKey()))
 		rawMessage.ResendMethod = common.ResendMethodSendPrivate
+		rawMessage.ResendType = common.ResendTypeDataSync
+		// MVDS only supports sending encrypted message
+		rawMessage.SkipEncryptionLayer = false
 		rawMessage.Recipients = append(rawMessage.Recipients, community.ControlNode())
 		return m.sender.SendPrivate(context.Background(), community.ControlNode(), rawMessage)
 	}
@@ -5088,6 +5122,7 @@ func (m *Messenger) startRequestMissingCommunityChannelsHRKeysLoop() {
 	logger := m.logger.Named("requestMissingCommunityChannelsHRKeysLoop")
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		for {
 			select {
 			case <-time.After(5 * time.Minute):
@@ -5121,4 +5156,33 @@ func (m *Messenger) startRequestMissingCommunityChannelsHRKeysLoop() {
 			}
 		}
 	}()
+}
+
+// getCommunityStorenode returns the active mailserver if a communityID is present then it'll return the mailserver
+// for that community if it has a mailserver setup otherwise it'll return the global mailserver
+func (m *Messenger) getCommunityStorenode(communityID ...string) peer.ID {
+	if m.transport.WakuVersion() != 2 {
+		return ""
+	}
+
+	if len(communityID) == 0 || communityID[0] == "" {
+		return m.transport.GetActiveStorenode()
+	}
+
+	ms, err := m.communityStorenodes.GetStorenodeByCommunityID(communityID[0])
+	if err != nil {
+		if !errors.Is(err, storenodes.ErrNotFound) {
+			m.logger.Error("getting storenode for community, using global", zap.String("communityID", communityID[0]), zap.Error(err))
+		}
+		// if we don't find a specific mailserver for the community, we just use the regular mailserverCycle's one
+		return m.transport.GetActiveStorenode()
+	}
+
+	peerID, err := ms.PeerID()
+	if err != nil {
+		m.logger.Error("getting storenode for community, using global", zap.String("communityID", communityID[0]), zap.Error(err))
+		return m.transport.GetActiveStorenode()
+	}
+
+	return peerID
 }

@@ -3,7 +3,10 @@ package types
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -11,6 +14,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/pborman/uuid"
+
+	"github.com/waku-org/go-waku/waku/v2/api/history"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/p2p/enode"
@@ -176,20 +181,6 @@ type Waku interface {
 	Unsubscribe(ctx context.Context, id string) error
 	UnsubscribeMany(ids []string) error
 
-	// RequestHistoricMessages sends a message with p2pRequestCode to a specific peer,
-	// which is known to implement MailServer interface, and is supposed to process this
-	// request and respond with a number of peer-to-peer messages (possibly expired),
-	// which are not supposed to be forwarded any further.
-	// The whisper protocol is agnostic of the format and contents of envelope.
-	// A timeout of 0 never expires.
-	RequestHistoricMessagesWithTimeout(peerID []byte, envelope Envelope, timeout time.Duration) error
-	// SendMessagesRequest sends a MessagesRequest. This is an equivalent to RequestHistoricMessages
-	// in terms of the functionality.
-	SendMessagesRequest(peerID []byte, request MessagesRequest) error
-
-	// RequestStoreMessages uses the WAKU2-STORE protocol to request historic messages
-	RequestStoreMessages(ctx context.Context, peerID []byte, request MessagesRequest, processEnvelopes bool) (StoreRequestCursor, int, error)
-
 	// ProcessingP2PMessages indicates whether there are in-flight p2p messages
 	ProcessingP2PMessages() bool
 
@@ -205,9 +196,57 @@ type Waku interface {
 	// ConfirmMessageDelivered updates a message has been delivered in waku
 	ConfirmMessageDelivered(hash []common.Hash)
 
-	// SetStorePeerID updates the peer id of store node
-	SetStorePeerID(peerID peer.ID)
-
 	// PeerID returns node's PeerID
 	PeerID() peer.ID
+
+	// GetActiveStorenode returns the peer ID of the currently active storenode. It will be empty if no storenode is active
+	GetActiveStorenode() peer.ID
+
+	// OnStorenodeChanged is triggered when a new storenode is promoted to become the active storenode or when the active storenode is removed
+	OnStorenodeChanged() <-chan peer.ID
+
+	// OnStorenodeNotWorking is triggered when the last active storenode fails to return results consistently
+	OnStorenodeNotWorking() <-chan struct{}
+
+	// OnStorenodeAvailable is triggered when there is a new active storenode selected
+	OnStorenodeAvailable() <-chan peer.ID
+
+	// WaitForAvailableStoreNode will wait for a storenode to be available depending on the context
+	WaitForAvailableStoreNode(ctx context.Context) bool
+
+	// SetStorenodeConfigProvider will set the configuration provider for the storenode cycle
+	SetStorenodeConfigProvider(c history.StorenodeConfigProvider)
+
+	// ProcessMailserverBatch will receive a criteria and storenode and execute a query
+	ProcessMailserverBatch(
+		ctx context.Context,
+		batch MailserverBatch,
+		storenodeID peer.ID,
+		pageLimit uint64,
+		shouldProcessNextPage func(int) (bool, uint64),
+		processEnvelopes bool,
+	) error
+
+	// IsStorenodeAvailable is used to determine whether a storenode is available or not
+	IsStorenodeAvailable(peerID peer.ID) bool
+
+	PerformStorenodeTask(fn func() error, opts ...history.StorenodeTaskOption) error
+
+	// DisconnectActiveStorenode will trigger a disconnection of the active storenode, and potentially execute a cycling so a new storenode is promoted
+	DisconnectActiveStorenode(ctx context.Context, backoff time.Duration, shouldCycle bool)
+}
+
+type MailserverBatch struct {
+	From        time.Time
+	To          time.Time
+	Cursor      string
+	PubsubTopic string
+	Topics      []TopicType
+	ChatIDs     []string
+}
+
+func (mb *MailserverBatch) Hash() string {
+	data := fmt.Sprintf("%d%d%s%s%v%v", mb.From.UnixNano(), mb.To.UnixNano(), mb.Cursor, mb.PubsubTopic, mb.Topics, mb.ChatIDs)
+	hash := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(hash[:4])
 }

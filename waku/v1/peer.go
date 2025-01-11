@@ -21,6 +21,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/rlp"
 
+	gocommon "github.com/status-im/status-go/common"
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/waku/common"
 )
@@ -129,14 +130,6 @@ func (p *Peer) RequestHistoricMessages(envelope *common.Envelope) (err error) {
 	err = p2p.Send(p.rw, p2pRequestCode, envelope)
 	if err != nil {
 		p.stats.AddUpload(envelope)
-	}
-	return
-}
-
-func (p *Peer) SendMessagesRequest(request common.MessagesRequest) (err error) {
-	err = p2p.Send(p.rw, p2pRequestCode, request)
-	if err != nil {
-		p.stats.AddUpload(request)
 	}
 	return
 }
@@ -422,6 +415,7 @@ func (p *Peer) handleP2PRequestCompleteCode(packet p2p.Msg) error {
 
 // sendConfirmation sends messageResponseCode and batchAcknowledgedCode messages.
 func (p *Peer) sendConfirmation(data []byte, envelopeErrors []common.EnvelopeError) (err error) {
+	defer gocommon.LogOnPanic()
 	batchHash := crypto.Keccak256Hash(data)
 	msg := NewMessagesResponse(batchHash, envelopeErrors)
 	err = p2p.Send(p.rw, messageResponseCode, msg)
@@ -445,6 +439,7 @@ func (p *Peer) handshake() error {
 	errc := make(chan error, 1)
 	opts := StatusOptionsFromHost(p.host)
 	go func() {
+		defer gocommon.LogOnPanic()
 		err := p2p.Send(p.rw, statusCode, opts)
 		if err != nil {
 			p.stats.AddUpload(statusCode)
@@ -486,6 +481,8 @@ func (p *Peer) handshake() error {
 // update executes periodic operations on the peer, including message transmission
 // and expiration.
 func (p *Peer) update() {
+	defer gocommon.LogOnPanic()
+
 	// Start the tickers for the updates
 	expire := time.NewTicker(common.ExpirationCycle)
 	transmit := time.NewTicker(common.TransmissionCycle)

@@ -26,17 +26,21 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/waku-org/go-waku/waku/v2/payload"
 	"github.com/waku-org/go-waku/waku/v2/protocol/pb"
 
+	"github.com/status-im/status-go/logutils"
 	"github.com/status-im/status-go/wakuv2/common"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"google.golang.org/protobuf/proto"
+
+	gocommon "github.com/status-im/status-go/common"
 )
 
 // List of errors
@@ -168,8 +172,6 @@ func (api *PublicWakuAPI) DeleteSymKey(ctx context.Context, id string) bool {
 func (api *PublicWakuAPI) BloomFilter() []byte {
 	return nil
 }
-
-//go:generate gencodec -type NewMessage -field-override newMessageOverride -out gen_newmessage_json.go
 
 // NewMessage represents a new waku message that is posted through the RPC.
 type NewMessage struct {
@@ -349,6 +351,7 @@ func (api *PublicWakuAPI) Messages(ctx context.Context, crit Criteria) (*rpc.Sub
 	// create subscription and start waiting for message events
 	rpcSub := notifier.CreateSubscription()
 	go func() {
+		defer gocommon.LogOnPanic()
 		// for now poll internally, refactor waku internal for channel support
 		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
@@ -359,7 +362,7 @@ func (api *PublicWakuAPI) Messages(ctx context.Context, crit Criteria) (*rpc.Sub
 				if filter := api.w.GetFilter(id); filter != nil {
 					for _, rpcMessage := range toMessage(filter.Retrieve()) {
 						if err := notifier.Notify(rpcSub.ID, rpcMessage); err != nil {
-							log.Error("Failed to send notification", "err", err)
+							logutils.ZapLogger().Error("Failed to send notification", zap.Error(err))
 						}
 					}
 				}
@@ -372,8 +375,6 @@ func (api *PublicWakuAPI) Messages(ctx context.Context, crit Criteria) (*rpc.Sub
 
 	return rpcSub, nil
 }
-
-//go:generate gencodec -type Message -field-override messageOverride -out gen_message_json.go
 
 // Message is the RPC representation of a waku message.
 type Message struct {

@@ -7,11 +7,12 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
-	gomock "github.com/golang/mock/gomock"
+	gomock "go.uber.org/mock/gomock"
 
 	"github.com/status-im/status-go/params"
 	"github.com/status-im/status-go/services/wallet/bigint"
 	walletCommon "github.com/status-im/status-go/services/wallet/common"
+	pathProcessorCommon "github.com/status-im/status-go/services/wallet/router/pathprocessor/common"
 	"github.com/status-im/status-go/services/wallet/thirdparty/paraswap"
 	mock_paraswap "github.com/status-im/status-go/services/wallet/thirdparty/paraswap/mock"
 	"github.com/status-im/status-go/services/wallet/token"
@@ -21,28 +22,30 @@ import (
 
 func TestParaswapWithPartnerFee(t *testing.T) {
 	testPriceRoute := &paraswap.Route{
-		GasCost:           &bigint.BigInt{Int: big.NewInt(500)},
-		SrcAmount:         &bigint.BigInt{Int: big.NewInt(1000)},
-		SrcTokenAddress:   common.HexToAddress("0x123"),
-		SrcTokenDecimals:  18,
-		DestAmount:        &bigint.BigInt{Int: big.NewInt(2000)},
-		DestTokenAddress:  common.HexToAddress("0x465"),
-		DestTokenDecimals: 6,
-		Side:              paraswap.SellSide,
+		GasCost:            &bigint.BigInt{Int: big.NewInt(500)},
+		SrcAmount:          &bigint.BigInt{Int: big.NewInt(1000)},
+		SrcTokenAddress:    common.HexToAddress("0x123"),
+		SrcTokenDecimals:   18,
+		DestAmount:         &bigint.BigInt{Int: big.NewInt(2000)},
+		DestTokenAddress:   common.HexToAddress("0x465"),
+		DestTokenDecimals:  6,
+		Side:               paraswap.SellSide,
+		ContractAddress:    common.HexToAddress("0x789"),
+		TokenTransferProxy: common.HexToAddress("0xabc"),
 	}
 
 	processor := NewSwapParaswapProcessor(nil, nil, nil)
 
 	fromToken := token.Token{
-		Symbol: EthSymbol,
+		Symbol: walletCommon.EthSymbol,
 	}
 	toToken := token.Token{
-		Symbol: UsdcSymbol,
+		Symbol: walletCommon.UsdcSymbol,
 	}
 	chainIDs := []uint64{walletCommon.EthereumMainnet, walletCommon.ArbitrumMainnet, walletCommon.OptimismMainnet, walletCommon.UnknownChainID}
 
 	for _, chainID := range chainIDs {
-		key := makeKey(chainID, chainID, fromToken.Symbol, toToken.Symbol)
+		key := pathProcessorCommon.MakeKey(chainID, chainID, fromToken.Symbol, toToken.Symbol, testPriceRoute.SrcAmount.Int)
 		processor.priceRoute.Store(key, testPriceRoute)
 
 		testInputParams := ProcessorInputParams{
@@ -50,11 +53,12 @@ func TestParaswapWithPartnerFee(t *testing.T) {
 			ToChain:   &params.Network{ChainID: chainID},
 			FromToken: &fromToken,
 			ToToken:   &toToken,
+			AmountIn:  testPriceRoute.SrcAmount.Int,
 		}
 
 		partnerAddress, partnerFeePcnt := getPartnerAddressAndFeePcnt(chainID)
 
-		if partnerAddress != walletCommon.ZeroAddress {
+		if partnerAddress != walletCommon.ZeroAddress() {
 			require.Greater(t, partnerFeePcnt, 0.0)
 
 			expectedFee := uint64(float64(testPriceRoute.DestAmount.Uint64()) * partnerFeePcnt / 100.0)
@@ -72,6 +76,11 @@ func TestParaswapWithPartnerFee(t *testing.T) {
 			require.NotNil(t, amountOut)
 			require.Equal(t, testPriceRoute.DestAmount.Uint64(), amountOut.Uint64())
 		}
+
+		// Check contract address
+		contractAddress, err := processor.GetContractAddress(testInputParams)
+		require.NoError(t, err)
+		require.Equal(t, testPriceRoute.TokenTransferProxy, contractAddress)
 	}
 }
 
@@ -99,10 +108,10 @@ func TestParaswapErrors(t *testing.T) {
 	processor.paraswapClient = client
 
 	fromToken := token.Token{
-		Symbol: EthSymbol,
+		Symbol: walletCommon.EthSymbol,
 	}
 	toToken := token.Token{
-		Symbol: UsdcSymbol,
+		Symbol: walletCommon.UsdcSymbol,
 	}
 	chainID := walletCommon.EthereumMainnet
 

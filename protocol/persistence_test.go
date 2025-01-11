@@ -322,15 +322,15 @@ func TestLatestMessageByChatID(t *testing.T) {
 	require.Equal(t, m[0].ID, ids[9])
 }
 
-func TestOldestMessageWhisperTimestampByChatID(t *testing.T) {
+func TestOldestMessageWhisperTimestampByChatIDs(t *testing.T) {
 	db, err := openTestDB()
 	require.NoError(t, err)
 	p := newSQLitePersistence(db)
 	chatID := testPublicChatID
 
-	_, hasMessage, err := p.OldestMessageWhisperTimestampByChatID(chatID)
+	timestamps, err := p.OldestMessageWhisperTimestampByChatIDs([]string{chatID})
 	require.NoError(t, err)
-	require.False(t, hasMessage)
+	require.Equal(t, 0, len(timestamps))
 
 	var messages []*common.Message
 	for i := 0; i < 10; i++ {
@@ -348,10 +348,10 @@ func TestOldestMessageWhisperTimestampByChatID(t *testing.T) {
 	err = p.SaveMessages(messages)
 	require.NoError(t, err)
 
-	timestamp, hasMessage, err := p.OldestMessageWhisperTimestampByChatID(chatID)
+	timestamps, err = p.OldestMessageWhisperTimestampByChatIDs([]string{chatID})
 	require.NoError(t, err)
-	require.True(t, hasMessage)
-	require.Equal(t, uint64(10), timestamp)
+	require.Equal(t, 1, len(timestamps))
+	require.Equal(t, uint64(10), timestamps[chatID])
 }
 
 func TestPinMessageByChatID(t *testing.T) {
@@ -475,6 +475,23 @@ func TestPinMessageByChatID(t *testing.T) {
 	require.Equal(t, "them", result[len(result)-1].PinnedBy)
 	for i := 0; i < len(result)-1; i++ {
 		require.Equal(t, testPK, result[i].PinnedBy)
+	}
+
+	// The Message itself should have the pinnedBy field
+	pinnedMessageID := result[len(result)-1].Message.ID
+
+	m, err := p.MessagesByIDs([]string{pinnedMessageID})
+	require.NoError(t, err)
+	require.Len(t, m, 1)
+	require.Equal(t, "them", m[0].PinnedBy)
+
+	msgs, _, err := p.MessageByChatID(chatID, cursor, 10)
+	require.NoError(t, err)
+	require.Len(t, msgs, 10)
+	for _, msg := range msgs {
+		if msg.ID == pinnedMessageID {
+			require.Equal(t, "them", msg.PinnedBy)
+		}
 	}
 }
 
@@ -664,6 +681,50 @@ func TestDeleteMessagesByChatID(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, len(m))
 
+}
+
+func TestDeletePinnedMessageByID(t *testing.T) {
+	db, err := openTestDB()
+	require.NoError(t, err)
+	p := newSQLitePersistence(db)
+	id := "1"
+
+	err = insertMinimalMessage(p, id)
+	require.NoError(t, err)
+
+	m, err := p.MessageByID(id)
+	require.NoError(t, err)
+	require.Equal(t, id, m.ID)
+
+	pinMessageProto := protobuf.PinMessage{
+		ChatId:      testPublicChatID,
+		MessageId:   m.ID,
+		Pinned:      true,
+		Clock:       2,
+		MessageType: protobuf.MessageType_PUBLIC_GROUP,
+	}
+
+	pinMessage := &common.PinMessage{
+		PinMessage: &pinMessageProto,
+	}
+
+	inserted, err := p.SavePinMessage(pinMessage)
+	require.NoError(t, err)
+	require.True(t, inserted)
+
+	pinnedMsgs, _, err := p.PinnedMessageByChatID(testPublicChatID, "", 10)
+	require.NoError(t, err)
+	require.Len(t, pinnedMsgs, 1)
+
+	err = p.DeleteMessage(m.ID)
+	require.NoError(t, err)
+
+	_, err = p.MessageByID(id)
+	require.EqualError(t, err, "record not found")
+
+	pinnedMsgs, _, err = p.PinnedMessageByChatID(testPublicChatID, "", 10)
+	require.NoError(t, err)
+	require.Len(t, pinnedMsgs, 0)
 }
 
 func TestMarkMessageSeen(t *testing.T) {
@@ -1983,43 +2044,43 @@ func TestBridgeMessageReplies(t *testing.T) {
 
 	require.NoError(t, err)
 
-	err = insertMinimalBridgeMessage(p, "111", "1", "")
+	err = insertMinimalBridgeMessage(p, "message1", "discordId1", "")
 	require.NoError(t, err)
 
-	err = insertMinimalBridgeMessage(p, "222", "2", "1")
+	err = insertMinimalBridgeMessage(p, "message2", "discordId2", "message1")
 	require.NoError(t, err)
 
-	// "333 is not delivered yet"
+	// "message3 is not delivered yet"
 
 	// this is a reply to a message which was not delivered yet
-	err = insertMinimalBridgeMessage(p, "444", "4", "3")
+	err = insertMinimalBridgeMessage(p, "message4", "discordId4", "message3")
 	require.NoError(t, err)
 
-	// status message "222" should have reply_to = "111"
-	responseTo, err := messageResponseTo(p, "222")
+	// status message "message2" should have reply_to ="message1" because it's a discord message to another discord message
+	responseTo, err := messageResponseTo(p, "message2")
 	require.NoError(t, err)
-	require.Equal(t, "111", responseTo)
+	require.Equal(t, "message1", responseTo)
 
-	responseTo, err = messageResponseTo(p, "111")
+	responseTo, err = messageResponseTo(p, "message1")
 	require.NoError(t, err)
 	require.Equal(t, "", responseTo)
 
-	responseTo, err = messageResponseTo(p, "444")
+	responseTo, err = messageResponseTo(p, "message4")
+	require.NoError(t, err)
+	require.Equal(t, "message3", responseTo)
+
+	// receiving message for which "message4" is replied to
+	err = insertMinimalBridgeMessage(p, "message3", "discordId3", "")
+	require.NoError(t, err)
+
+	responseTo, err = messageResponseTo(p, "message3")
 	require.NoError(t, err)
 	require.Equal(t, "", responseTo)
 
-	// receiving message for which "444" is replied to
-	err = insertMinimalBridgeMessage(p, "333", "3", "")
+	// message4 is still replied to message3
+	responseTo, err = messageResponseTo(p, "message4")
 	require.NoError(t, err)
-
-	responseTo, err = messageResponseTo(p, "333")
-	require.NoError(t, err)
-	require.Equal(t, "", responseTo)
-
-	// now 444 is replied to 333
-	responseTo, err = messageResponseTo(p, "444")
-	require.NoError(t, err)
-	require.Equal(t, "333", responseTo)
+	require.Equal(t, "message3", responseTo)
 }
 
 func createAndSaveMessage(p *sqlitePersistence, id string, from string, deleted bool, communityID string) error {
@@ -2127,4 +2188,46 @@ func TestGetCommunityMemberMessages(t *testing.T) {
 	messages, err = p.GetCommunityMemberAllMessages(testPK, testCommunity)
 	require.NoError(t, err)
 	require.Len(t, messages, 2)
+}
+
+func TestPaymentRequestMessages(t *testing.T) {
+	db, err := openTestDB()
+	require.NoError(t, err)
+	p := newSQLitePersistence(db)
+	chatID := testPublicChatID
+	var messages []*common.Message
+
+	message := common.Message{
+		ID:          strconv.Itoa(1),
+		LocalChatID: chatID,
+		ChatMessage: &protobuf.ChatMessage{
+			Clock: uint64(1),
+		},
+		From: testPK,
+	}
+	message.PaymentRequests = []*protobuf.PaymentRequest{
+		{
+			Amount:   "1.123",
+			Symbol:   "ETH",
+			Receiver: "0x123",
+			ChainId:  1,
+		},
+		{
+			Amount:   "1.124",
+			Symbol:   "DAI",
+			Receiver: "0x124",
+			ChainId:  11,
+		},
+	}
+
+	messages = append(messages, &message)
+
+	err = p.SaveMessages(messages)
+	require.NoError(t, err)
+
+	m, _, err := p.MessageByChatID(testPublicChatID, "", 10)
+	require.NoError(t, err)
+	require.Len(t, m, 1)
+
+	require.Equal(t, m[0].PaymentRequests, message.PaymentRequests)
 }

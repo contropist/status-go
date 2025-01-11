@@ -66,7 +66,7 @@ type CreateAccount struct {
 	// If you want to use non-default network, use NetworkID.
 	CurrentNetwork       string           `json:"currentNetwork"`
 	NetworkID            *uint64          `json:"networkId"`
-	TestOverrideNetworks []params.Network `json:"-"` // This is used for testing purposes only
+	TestOverrideNetworks []params.Network `json:"networksOverride"` // This is used for testing purposes only
 
 	TestNetworksEnabled bool `json:"testNetworksEnabled"`
 
@@ -79,7 +79,11 @@ type CreateAccount struct {
 
 	APIConfig *APIConfig `json:"apiConfig"`
 
-	KeycardInstanceUID     string  `json:"keycardInstanceUID"`
+	KeycardInstanceUID string `json:"keycardInstanceUID"`
+
+	// on mobile there is no KeycardPairingDataFile, so for now KeycardPairingKey will be used
+	// for recovering account
+	KeycardPairingKey      string  `json:"keycardPairingKey"`
 	KeycardPairingDataFile *string `json:"keycardPairingDataFile"`
 	StatusProxyEnabled     bool    `json:"statusProxyEnabled"`
 }
@@ -93,13 +97,10 @@ type WalletSecretsConfig struct {
 	RaribleTestnetAPIKey string `json:"raribleTestnetApiKey"`
 
 	AlchemyEthereumMainnetToken string `json:"alchemyEthereumMainnetToken"`
-	AlchemyEthereumGoerliToken  string `json:"alchemyEthereumGoerliToken"`
 	AlchemyEthereumSepoliaToken string `json:"alchemyEthereumSepoliaToken"`
 	AlchemyArbitrumMainnetToken string `json:"alchemyArbitrumMainnetToken"`
-	AlchemyArbitrumGoerliToken  string `json:"alchemyArbitrumGoerliToken"`
 	AlchemyArbitrumSepoliaToken string `json:"alchemyArbitrumSepoliaToken"`
 	AlchemyOptimismMainnetToken string `json:"alchemyOptimismMainnetToken"`
-	AlchemyOptimismGoerliToken  string `json:"alchemyOptimismGoerliToken"`
 	AlchemyOptimismSepoliaToken string `json:"alchemyOptimismSepoliaToken"`
 
 	StatusProxyStageName          string `json:"statusProxyStageName"`

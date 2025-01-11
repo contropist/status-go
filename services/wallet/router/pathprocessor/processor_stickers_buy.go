@@ -16,33 +16,32 @@ import (
 	stickersContracts "github.com/status-im/status-go/contracts/stickers"
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/rpc"
-	"github.com/status-im/status-go/services/stickers"
 	walletCommon "github.com/status-im/status-go/services/wallet/common"
+	pathProcessorCommon "github.com/status-im/status-go/services/wallet/router/pathprocessor/common"
+	"github.com/status-im/status-go/services/wallet/wallettypes"
 	"github.com/status-im/status-go/transactions"
 )
 
 type StickersBuyProcessor struct {
-	contractMaker   *contracts.ContractMaker
-	transactor      transactions.TransactorIface
-	stickersService *stickers.Service
+	contractMaker *contracts.ContractMaker
+	transactor    transactions.TransactorIface
 }
 
-func NewStickersBuyProcessor(rpcClient *rpc.Client, transactor transactions.TransactorIface, stickersService *stickers.Service) *StickersBuyProcessor {
+func NewStickersBuyProcessor(rpcClient *rpc.Client, transactor transactions.TransactorIface) *StickersBuyProcessor {
 	return &StickersBuyProcessor{
 		contractMaker: &contracts.ContractMaker{
 			RPCClient: rpcClient,
 		},
-		transactor:      transactor,
-		stickersService: stickersService,
+		transactor: transactor,
 	}
 }
 
 func createStickersBuyErrorResponse(err error) error {
-	return createErrorResponse(ProcessorStickersBuyName, err)
+	return createErrorResponse(pathProcessorCommon.ProcessorStickersBuyName, err)
 }
 
 func (s *StickersBuyProcessor) Name() string {
-	return ProcessorStickersBuyName
+	return pathProcessorCommon.ProcessorStickersBuyName
 }
 
 func (s *StickersBuyProcessor) AvailableFor(params ProcessorInputParams) (bool, error) {
@@ -50,7 +49,7 @@ func (s *StickersBuyProcessor) AvailableFor(params ProcessorInputParams) (bool, 
 }
 
 func (s *StickersBuyProcessor) CalculateFees(params ProcessorInputParams) (*big.Int, *big.Int, error) {
-	return ZeroBigIntValue, ZeroBigIntValue, nil
+	return walletCommon.ZeroBigIntValue(), walletCommon.ZeroBigIntValue(), nil
 }
 
 func (s *StickersBuyProcessor) PackTxInputData(params ProcessorInputParams) ([]byte, error) {
@@ -93,7 +92,7 @@ func (s *StickersBuyProcessor) EstimateGas(params ProcessorInputParams) (uint64,
 	if params.TestsMode {
 		if params.TestEstimationMap != nil {
 			if val, ok := params.TestEstimationMap[s.Name()]; ok {
-				return val, nil
+				return val.Value, val.Err
 			}
 		}
 		return 0, ErrNoEstimationFound
@@ -117,7 +116,7 @@ func (s *StickersBuyProcessor) EstimateGas(params ProcessorInputParams) (uint64,
 	msg := ethereum.CallMsg{
 		From:  params.FromAddr,
 		To:    &contractAddress,
-		Value: ZeroBigIntValue,
+		Value: walletCommon.ZeroBigIntValue(),
 		Data:  input,
 	}
 
@@ -126,7 +125,7 @@ func (s *StickersBuyProcessor) EstimateGas(params ProcessorInputParams) (uint64,
 		return 0, createStickersBuyErrorResponse(err)
 	}
 
-	increasedEstimation := float64(estimation) * IncreaseEstimatedGasFactor
+	increasedEstimation := float64(estimation) * pathProcessorCommon.IncreaseEstimatedGasFactor
 
 	return uint64(increasedEstimation), nil
 }
@@ -137,6 +136,10 @@ func (s *StickersBuyProcessor) Send(sendArgs *MultipathProcessorTxArgs, lastUsed
 
 func (s *StickersBuyProcessor) BuildTransaction(sendArgs *MultipathProcessorTxArgs, lastUsedNonce int64) (*ethTypes.Transaction, uint64, error) {
 	return s.transactor.ValidateAndBuildTransaction(sendArgs.ChainID, *sendArgs.TransferTx, lastUsedNonce)
+}
+
+func (s *StickersBuyProcessor) BuildTransactionV2(sendArgs *wallettypes.SendTxArgs, lastUsedNonce int64) (*ethTypes.Transaction, uint64, error) {
+	return s.transactor.ValidateAndBuildTransaction(sendArgs.FromChainID, *sendArgs, lastUsedNonce)
 }
 
 func (s *StickersBuyProcessor) CalculateAmountOut(params ProcessorInputParams) (*big.Int, error) {

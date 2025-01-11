@@ -1,5 +1,7 @@
 package rpc
 
+//go:generate mockgen -package=mock_rpcclient -source=client.go -destination=mock/client/client.go
+
 import (
 	"context"
 	"database/sql"
@@ -14,26 +16,28 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/ethereum/go-ethereum/log"
+	"go.uber.org/zap"
+
 	gethrpc "github.com/ethereum/go-ethereum/rpc"
 
+	"github.com/ethereum/go-ethereum/event"
 	appCommon "github.com/status-im/status-go/common"
+	"github.com/status-im/status-go/healthmanager"
+	"github.com/status-im/status-go/internal/version"
+	"github.com/status-im/status-go/logutils"
 	"github.com/status-im/status-go/params"
 	"github.com/status-im/status-go/rpc/chain"
+	"github.com/status-im/status-go/rpc/chain/ethclient"
+	"github.com/status-im/status-go/rpc/chain/rpclimiter"
 	"github.com/status-im/status-go/rpc/network"
 	"github.com/status-im/status-go/services/rpcstats"
 	"github.com/status-im/status-go/services/wallet/common"
+	"github.com/status-im/status-go/services/wallet/walletevent"
 )
 
 const (
 	// DefaultCallTimeout is a default timeout for an RPC call
 	DefaultCallTimeout = time.Minute
-
-	// Names of providers
-	providerGrove       = "grove"
-	providerInfura      = "infura"
-	ProviderStatusProxy = "status-proxy"
 
 	mobile  = "mobile"
 	desktop = "desktop"
@@ -45,6 +49,8 @@ const (
 	// rpcUserAgentUpstreamFormat a separate user agent format for upstream, because we should not be using upstream
 	// if we see this user agent in the logs that means parts of the application are using a malconfigured http client
 	rpcUserAgentUpstreamFormat = "procuratee-%s-upstream/%s"
+
+	EventBlockchainHealthChanged walletevent.EventType = "wallet-blockchain-health-changed" // Full status of the blockchain (including provider statuses)
 )
 
 // List of RPC client errors.
@@ -54,17 +60,17 @@ var (
 
 var (
 	// rpcUserAgentName the user agent
-	rpcUserAgentName         = fmt.Sprintf(rpcUserAgentFormat, "no-GOOS", params.Version)
-	rpcUserAgentUpstreamName = fmt.Sprintf(rpcUserAgentUpstreamFormat, "no-GOOS", params.Version)
+	rpcUserAgentName         = fmt.Sprintf(rpcUserAgentFormat, "no-GOOS", version.Version())
+	rpcUserAgentUpstreamName = fmt.Sprintf(rpcUserAgentUpstreamFormat, "no-GOOS", version.Version())
 )
 
 func init() {
 	if appCommon.IsMobilePlatform() {
-		rpcUserAgentName = fmt.Sprintf(rpcUserAgentFormat, mobile, params.Version)
-		rpcUserAgentUpstreamName = fmt.Sprintf(rpcUserAgentUpstreamFormat, mobile, params.Version)
+		rpcUserAgentName = fmt.Sprintf(rpcUserAgentFormat, mobile, version.Version())
+		rpcUserAgentUpstreamName = fmt.Sprintf(rpcUserAgentUpstreamFormat, mobile, version.Version())
 	} else {
-		rpcUserAgentName = fmt.Sprintf(rpcUserAgentFormat, desktop, params.Version)
-		rpcUserAgentUpstreamName = fmt.Sprintf(rpcUserAgentUpstreamFormat, desktop, params.Version)
+		rpcUserAgentName = fmt.Sprintf(rpcUserAgentFormat, desktop, version.Version())
+		rpcUserAgentUpstreamName = fmt.Sprintf(rpcUserAgentUpstreamFormat, desktop, version.Version())
 	}
 }
 
@@ -72,10 +78,13 @@ func init() {
 type Handler func(context.Context, uint64, ...interface{}) (interface{}, error)
 
 type ClientInterface interface {
-	AbstractEthClient(chainID common.ChainID) (chain.BatchCallClient, error)
+	AbstractEthClient(chainID common.ChainID) (ethclient.BatchCallClient, error)
 	EthClient(chainID uint64) (chain.ClientInterface, error)
 	EthClients(chainIDs []uint64) (map[uint64]chain.ClientInterface, error)
 	CallContext(context context.Context, result interface{}, chainID uint64, method string, args ...interface{}) error
+	Call(result interface{}, chainID uint64, method string, args ...interface{}) error
+	CallRaw(body string) string
+	GetNetworkManager() *network.Manager
 }
 
 // Client represents RPC client with custom routing
@@ -84,23 +93,24 @@ type ClientInterface interface {
 type Client struct {
 	sync.RWMutex
 
-	upstreamEnabled bool
-	upstreamURL     string
 	UpstreamChainID uint64
 
 	local              *gethrpc.Client
-	upstream           chain.ClientInterface
 	rpcClientsMutex    sync.RWMutex
 	rpcClients         map[uint64]chain.ClientInterface
 	rpsLimiterMutex    sync.RWMutex
-	limiterPerProvider map[string]*chain.RPCRpsLimiter
+	limiterPerProvider map[string]*rpclimiter.RPCRpsLimiter
 
 	router         *router
 	NetworkManager *network.Manager
 
+	healthMgr          *healthmanager.BlockchainHealthManager
+	stopMonitoringFunc context.CancelFunc
+	walletFeed         *event.Feed
+
 	handlersMx sync.RWMutex       // mx guards handlers
 	handlers   map[string]Handler // locally registered handlers
-	log        log.Logger
+	logger     *zap.Logger
 
 	walletNotifier  func(chainID uint64, message string)
 	providerConfigs []params.ProviderConfig
@@ -109,72 +119,110 @@ type Client struct {
 // Is initialized in a build-tag-dependent module
 var verifProxyInitFn func(c *Client)
 
-// NewClient initializes Client and tries to connect to both,
-// upstream and local node.
+// ClientConfig holds the configuration for initializing a new Client.
+type ClientConfig struct {
+	Client          *gethrpc.Client
+	UpstreamChainID uint64
+	Networks        []params.Network
+	DB              *sql.DB
+	WalletFeed      *event.Feed
+	ProviderConfigs []params.ProviderConfig
+}
+
+// NewClient initializes Client
 //
 // Client is safe for concurrent use and will automatically
 // reconnect to the server if connection is lost.
-func NewClient(client *gethrpc.Client, upstreamChainID uint64, upstream params.UpstreamRPCConfig, networks []params.Network, db *sql.DB, providerConfigs []params.ProviderConfig) (*Client, error) {
+func NewClient(config ClientConfig) (*Client, error) {
 	var err error
 
-	log := log.New("package", "status-go/rpc.Client")
-	networkManager := network.NewManager(db)
+	logger := logutils.ZapLogger().Named("rpcClient")
+	networkManager := network.NewManager(config.DB)
 	if networkManager == nil {
 		return nil, errors.New("failed to create network manager")
 	}
 
-	err = networkManager.Init(networks)
+	err = networkManager.Init(config.Networks)
 	if err != nil {
-		log.Error("Network manager failed to initialize", "error", err)
+		logger.Error("Network manager failed to initialize", zap.Error(err))
 	}
 
 	c := Client{
-		local:              client,
+		local:              config.Client,
 		NetworkManager:     networkManager,
 		handlers:           make(map[string]Handler),
 		rpcClients:         make(map[uint64]chain.ClientInterface),
-		limiterPerProvider: make(map[string]*chain.RPCRpsLimiter),
-		log:                log,
-		providerConfigs:    providerConfigs,
+		limiterPerProvider: make(map[string]*rpclimiter.RPCRpsLimiter),
+		logger:             logger,
+		providerConfigs:    config.ProviderConfigs,
+		healthMgr:          healthmanager.NewBlockchainHealthManager(),
+		walletFeed:         config.WalletFeed,
 	}
 
-	var opts []gethrpc.ClientOption
-	opts = append(opts,
-		gethrpc.WithHeaders(http.Header{
-			"User-Agent": {rpcUserAgentUpstreamName},
-		}),
-	)
-
-	if upstream.Enabled {
-		c.UpstreamChainID = upstreamChainID
-		c.upstreamEnabled = upstream.Enabled
-		c.upstreamURL = upstream.URL
-		upstreamClient, err := gethrpc.DialOptions(context.Background(), c.upstreamURL, opts...)
-		if err != nil {
-			return nil, fmt.Errorf("dial upstream server: %s", err)
-		}
-		limiter, err := c.getRPCRpsLimiter(c.upstreamURL)
-		if err != nil {
-			return nil, fmt.Errorf("get RPC limiter: %s", err)
-		}
-		hostPortUpstream, err := extractHostFromURL(c.upstreamURL)
-		if err != nil {
-			hostPortUpstream = "upstream"
-		}
-
-		// Include the chain-id in the rpc client
-		rpcName := fmt.Sprintf("%s-chain-id-%d", hostPortUpstream, upstreamChainID)
-
-		c.upstream = chain.NewSimpleClient(*chain.NewEthClient(ethclient.NewClient(upstreamClient), limiter, upstreamClient, rpcName), upstreamChainID)
-	}
-
-	c.router = newRouter(c.upstreamEnabled)
+	c.UpstreamChainID = config.UpstreamChainID
+	c.router = newRouter(true)
 
 	if verifProxyInitFn != nil {
 		verifProxyInitFn(&c)
 	}
 
 	return &c, nil
+}
+
+func (c *Client) Start(ctx context.Context) {
+	if c.stopMonitoringFunc != nil {
+		c.logger.Warn("Blockchain health manager already started")
+		return
+	}
+
+	cancelableCtx, cancel := context.WithCancel(ctx)
+	c.stopMonitoringFunc = cancel
+	statusCh := c.healthMgr.Subscribe()
+	go c.monitorHealth(cancelableCtx, statusCh)
+}
+
+func (c *Client) Stop() {
+	c.healthMgr.Stop()
+	if c.stopMonitoringFunc == nil {
+		return
+	}
+	c.stopMonitoringFunc()
+	c.stopMonitoringFunc = nil
+}
+
+func (c *Client) monitorHealth(ctx context.Context, statusCh chan struct{}) {
+	defer appCommon.LogOnPanic()
+	sendFullStatusEventFunc := func() {
+		blockchainStatus := c.healthMgr.GetFullStatus()
+		encodedMessage, err := json.Marshal(blockchainStatus)
+		if err != nil {
+			c.logger.Warn("could not marshal full blockchain status", zap.Error(err))
+			return
+		}
+		if c.walletFeed == nil {
+			return
+		}
+		// FIXME: remove these excessive logs in future release (2.31+)
+		c.logger.Debug("Sending blockchain health status event", zap.String("status", string(encodedMessage)))
+		c.walletFeed.Send(walletevent.Event{
+			Type:    EventBlockchainHealthChanged,
+			Message: string(encodedMessage),
+			At:      time.Now().Unix(),
+		})
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-statusCh:
+			sendFullStatusEventFunc()
+		}
+	}
+}
+
+func (c *Client) GetNetworkManager() *network.Manager {
+	return c.NetworkManager
 }
 
 func (c *Client) SetWalletNotifier(notifier func(chainID uint64, message string)) {
@@ -190,24 +238,15 @@ func extractHostFromURL(inputURL string) (string, error) {
 	return parsedURL.Host, nil
 }
 
-func (c *Client) getRPCRpsLimiter(key string) (*chain.RPCRpsLimiter, error) {
+func (c *Client) getRPCRpsLimiter(key string) (*rpclimiter.RPCRpsLimiter, error) {
 	c.rpsLimiterMutex.Lock()
 	defer c.rpsLimiterMutex.Unlock()
 	if limiter, ok := c.limiterPerProvider[key]; ok {
 		return limiter, nil
 	}
-	limiter := chain.NewRPCRpsLimiter()
+	limiter := rpclimiter.NewRPCRpsLimiter()
 	c.limiterPerProvider[key] = limiter
 	return limiter, nil
-}
-
-func getProviderConfig(providerConfigs []params.ProviderConfig, providerName string) (params.ProviderConfig, error) {
-	for _, providerConfig := range providerConfigs {
-		if providerConfig.Name == providerName {
-			return providerConfig, nil
-		}
-	}
-	return params.ProviderConfig{}, fmt.Errorf("provider config not found for provider: %s", providerName)
 }
 
 func (c *Client) getClientUsingCache(chainID uint64) (chain.ClientInterface, error) {
@@ -222,9 +261,6 @@ func (c *Client) getClientUsingCache(chainID uint64) (chain.ClientInterface, err
 
 	network := c.NetworkManager.Find(chainID)
 	if network == nil {
-		if c.UpstreamChainID == chainID {
-			return c.upstream, nil
-		}
 		return nil, fmt.Errorf("could not find network: %d", chainID)
 	}
 
@@ -233,50 +269,33 @@ func (c *Client) getClientUsingCache(chainID uint64) (chain.ClientInterface, err
 		return nil, fmt.Errorf("could not find any RPC URL for chain: %d", chainID)
 	}
 
-	client := chain.NewClient(ethClients, chainID)
-	client.WalletNotifier = c.walletNotifier
+	phm := healthmanager.NewProvidersHealthManager(chainID)
+	err := c.healthMgr.RegisterProvidersHealthManager(context.Background(), phm)
+	if err != nil {
+		return nil, fmt.Errorf("register providers health manager: %s", err)
+	}
+
+	client := chain.NewClient(ethClients, chainID, phm)
+	client.SetWalletNotifier(c.walletNotifier)
 	c.rpcClients[chainID] = client
 	return client, nil
 }
 
-func (c *Client) getEthClients(network *params.Network) []*chain.EthClient {
-	urls := make(map[string]string)
-	keys := make([]string, 0)
-	authMap := make(map[string]string)
+func (c *Client) getEthClients(network *params.Network) []ethclient.RPSLimitedEthClientInterface {
+	ethClients := make([]ethclient.RPSLimitedEthClientInterface, 0)
 
-	// find proxy provider
-	proxyProvider, err := getProviderConfig(c.providerConfigs, ProviderStatusProxy)
-	if err != nil {
-		c.log.Warn("could not find provider config for status-proxy", "error", err)
-	}
-
-	if proxyProvider.Enabled {
-		key := ProviderStatusProxy
-		keyFallback := ProviderStatusProxy + "-fallback"
-		urls[key] = network.DefaultRPCURL
-		urls[keyFallback] = network.DefaultFallbackURL
-		keys = []string{key, keyFallback}
-		authMap[key] = proxyProvider.User + ":" + proxyProvider.Password
-		authMap[keyFallback] = authMap[key]
-	}
-	keys = append(keys, []string{"main", "fallback"}...)
-	urls["main"] = network.RPCURL
-	urls["fallback"] = network.FallbackURL
-
-	ethClients := make([]*chain.EthClient, 0)
-	for index, key := range keys {
+	providers := c.prepareProviders(network)
+	for index, provider := range providers {
 		var rpcClient *gethrpc.Client
-		var rpcLimiter *chain.RPCRpsLimiter
+		var rpcLimiter *rpclimiter.RPCRpsLimiter
 		var err error
 		var hostPort string
-		url := urls[key]
 
-		if len(url) > 0 {
+		if len(provider.URL) > 0 {
 			// For now, we only support auth for status-proxy.
-			authStr, ok := authMap[key]
 			var opts []gethrpc.ClientOption
-			if ok {
-				authEncoded := base64.StdEncoding.EncodeToString([]byte(authStr))
+			if provider.authenticationNeeded() {
+				authEncoded := base64.StdEncoding.EncodeToString([]byte(provider.Auth))
 				opts = append(opts,
 					gethrpc.WithHeaders(http.Header{
 						"Authorization": {"Basic " + authEncoded},
@@ -285,16 +304,16 @@ func (c *Client) getEthClients(network *params.Network) []*chain.EthClient {
 				)
 			}
 
-			rpcClient, err = gethrpc.DialOptions(context.Background(), url, opts...)
+			rpcClient, err = gethrpc.DialOptions(context.Background(), provider.URL, opts...)
 			if err != nil {
-				c.log.Error("dial server "+key, "error", err)
+				c.logger.Error("dial server "+provider.Key, zap.Error(err))
 			}
 
 			// If using the status-proxy, consider each endpoint as a separate provider
-			circuitKey := fmt.Sprintf("%s-%d", key, index)
+			circuitKey := fmt.Sprintf("%s-%d", provider.Key, index)
 			// Otherwise host is good enough
-			if !strings.Contains(url, "status.im") {
-				hostPort, err = extractHostFromURL(url)
+			if !strings.Contains(provider.URL, "status.im") {
+				hostPort, err = extractHostFromURL(provider.URL)
 				if err == nil {
 					circuitKey = hostPort
 				}
@@ -302,10 +321,10 @@ func (c *Client) getEthClients(network *params.Network) []*chain.EthClient {
 
 			rpcLimiter, err = c.getRPCRpsLimiter(circuitKey)
 			if err != nil {
-				c.log.Error("get RPC limiter "+key, "error", err)
+				c.logger.Error("get RPC limiter "+provider.Key, zap.Error(err))
 			}
 
-			ethClients = append(ethClients, chain.NewEthClient(ethclient.NewClient(rpcClient), rpcLimiter, rpcClient, circuitKey))
+			ethClients = append(ethClients, ethclient.NewRPSLimitedEthClient(rpcClient, rpcLimiter, circuitKey))
 		}
 	}
 
@@ -323,7 +342,7 @@ func (c *Client) EthClient(chainID uint64) (chain.ClientInterface, error) {
 }
 
 // AbstractEthClient returns a partial abstraction used by new components for testing purposes
-func (c *Client) AbstractEthClient(chainID common.ChainID) (chain.BatchCallClient, error) {
+func (c *Client) AbstractEthClient(chainID common.ChainID) (ethclient.BatchCallClient, error) {
 	client, err := c.getClientUsingCache(uint64(chainID))
 	if err != nil {
 		return nil, err
@@ -350,32 +369,6 @@ func (c *Client) SetClient(chainID uint64, client chain.ClientInterface) {
 	c.rpcClientsMutex.Lock()
 	defer c.rpcClientsMutex.Unlock()
 	c.rpcClients[chainID] = client
-}
-
-// UpdateUpstreamURL changes the upstream RPC client URL, if the upstream is enabled.
-func (c *Client) UpdateUpstreamURL(url string) error {
-	if c.upstream == nil {
-		return nil
-	}
-
-	rpcClient, err := gethrpc.Dial(url)
-	if err != nil {
-		return err
-	}
-	rpsLimiter, err := c.getRPCRpsLimiter(url)
-	if err != nil {
-		return err
-	}
-	c.Lock()
-	hostPortUpstream, err := extractHostFromURL(url)
-	if err != nil {
-		hostPortUpstream = "upstream"
-	}
-	c.upstream = chain.NewSimpleClient(*chain.NewEthClient(ethclient.NewClient(rpcClient), rpsLimiter, rpcClient, hostPortUpstream), c.UpstreamChainID)
-	c.upstreamURL = url
-	c.Unlock()
-
-	return nil
 }
 
 // Call performs a JSON-RPC call with the given arguments and unmarshals into
@@ -433,7 +426,7 @@ func (c *Client) CallContextIgnoringLocalHandlers(ctx context.Context, result in
 	}
 
 	if c.local == nil {
-		c.log.Warn("Local JSON-RPC endpoint missing", "method", method)
+		c.logger.Warn("Local JSON-RPC endpoint missing", zap.String("method", method))
 		return errors.New("missing local JSON-RPC endpoint")
 	}
 	return c.local.CallContext(ctx, result, method, args...)

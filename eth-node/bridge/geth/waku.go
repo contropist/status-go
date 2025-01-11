@@ -9,8 +9,11 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 
+	"github.com/waku-org/go-waku/waku/v2/api/history"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/p2p/enode"
+	gocommon "github.com/status-im/status-go/common"
 	"github.com/status-im/status-go/connection"
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/waku"
@@ -165,6 +168,7 @@ func (w *GethWakuWrapper) GetCurrentTime() time.Time {
 func (w *GethWakuWrapper) SubscribeEnvelopeEvents(eventsProxy chan<- types.EnvelopeEvent) types.Subscription {
 	events := make(chan wakucommon.EnvelopeEvent, 100) // must be buffered to prevent blocking whisper
 	go func() {
+		defer gocommon.LogOnPanic()
 		for e := range events {
 			eventsProxy <- *NewWakuEnvelopeEventWrapper(&e)
 		}
@@ -264,37 +268,12 @@ func (w *GethWakuWrapper) createFilterWrapper(id string, keyAsym *ecdsa.PrivateK
 	}, id), nil
 }
 
-func (w *GethWakuWrapper) SendMessagesRequest(peerID []byte, r types.MessagesRequest) error {
-	return w.waku.SendMessagesRequest(peerID, wakucommon.MessagesRequest{
-		ID:     r.ID,
-		From:   r.From,
-		To:     r.To,
-		Limit:  r.Limit,
-		Cursor: r.Cursor,
-		Bloom:  r.Bloom,
-		Topics: r.ContentTopics,
-	})
-}
-
-// RequestHistoricMessages sends a message with p2pRequestCode to a specific peer,
-// which is known to implement MailServer interface, and is supposed to process this
-// request and respond with a number of peer-to-peer messages (possibly expired),
-// which are not supposed to be forwarded any further.
-// The whisper protocol is agnostic of the format and contents of envelope.
-func (w *GethWakuWrapper) RequestHistoricMessagesWithTimeout(peerID []byte, envelope types.Envelope, timeout time.Duration) error {
-	return w.waku.RequestHistoricMessagesWithTimeout(peerID, envelope.Unwrap().(*wakucommon.Envelope), timeout)
-}
-
 func (w *GethWakuWrapper) ProcessingP2PMessages() bool {
 	return w.waku.ProcessingP2PMessages()
 }
 
 func (w *GethWakuWrapper) MarkP2PMessageAsProcessed(hash common.Hash) {
 	w.waku.MarkP2PMessageAsProcessed(hash)
-}
-
-func (w *GethWakuWrapper) RequestStoreMessages(ctx context.Context, peerID []byte, r types.MessagesRequest, processEnvelopes bool) (types.StoreRequestCursor, int, error) {
-	return nil, 0, errors.New("not implemented")
 }
 
 func (w *GethWakuWrapper) ConnectionChanged(_ connection.State) {}
@@ -333,9 +312,55 @@ func (w *wakuFilterWrapper) ID() string {
 func (w *GethWakuWrapper) ConfirmMessageDelivered(hashes []common.Hash) {
 }
 
-func (w *GethWakuWrapper) SetStorePeerID(peerID peer.ID) {
+func (w *GethWakuWrapper) PeerID() peer.ID {
+	panic("not available in WakuV1")
 }
 
-func (w *GethWakuWrapper) PeerID() peer.ID {
-	panic("not implemented")
+func (w *GethWakuWrapper) GetActiveStorenode() peer.ID {
+	panic("not available in WakuV1")
+}
+
+func (w *GethWakuWrapper) OnStorenodeChanged() <-chan peer.ID {
+	panic("not available in WakuV1")
+}
+
+func (w *GethWakuWrapper) OnStorenodeNotWorking() <-chan struct{} {
+	panic("not available in WakuV1")
+}
+
+func (w *GethWakuWrapper) OnStorenodeAvailable() <-chan peer.ID {
+	panic("not available in WakuV1")
+}
+
+func (w *GethWakuWrapper) WaitForAvailableStoreNode(ctx context.Context) bool {
+	return false
+}
+
+func (w *GethWakuWrapper) SetStorenodeConfigProvider(c history.StorenodeConfigProvider) {
+	panic("not available in WakuV1")
+}
+
+func (w *GethWakuWrapper) ProcessMailserverBatch(
+	ctx context.Context,
+	batch types.MailserverBatch,
+	storenodeID peer.ID,
+	pageLimit uint64,
+	shouldProcessNextPage func(int) (bool, uint64),
+	processEnvelopes bool,
+) error {
+	return errors.New("not available in WakuV1")
+}
+
+func (w *GethWakuWrapper) IsStorenodeAvailable(peerID peer.ID) bool {
+	panic("not available in WakuV1")
+
+}
+
+func (w *GethWakuWrapper) PerformStorenodeTask(fn func() error, opts ...history.StorenodeTaskOption) error {
+	panic("not available in WakuV1")
+
+}
+
+func (w *GethWakuWrapper) DisconnectActiveStorenode(ctx context.Context, backoff time.Duration, shouldCycle bool) {
+	panic("not available in WakuV1")
 }

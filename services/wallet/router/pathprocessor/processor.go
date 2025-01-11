@@ -1,5 +1,7 @@
 package pathprocessor
 
+//go:generate mockgen -package=mock_pathprocessor -source=processor.go -destination=mock/processor.go
+
 import (
 	"math/big"
 
@@ -9,7 +11,9 @@ import (
 	"github.com/status-im/status-go/account"
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/params"
+	"github.com/status-im/status-go/services/wallet/requests"
 	"github.com/status-im/status-go/services/wallet/token"
+	"github.com/status-im/status-go/services/wallet/wallettypes"
 )
 
 type PathProcessor interface {
@@ -31,6 +35,8 @@ type PathProcessor interface {
 	GetContractAddress(params ProcessorInputParams) (common.Address, error)
 	// BuildTransaction builds the transaction based on MultipathProcessorTxArgs, returns the transaction and the used nonce (lastUsedNonce is -1 if it's the first tx)
 	BuildTransaction(sendArgs *MultipathProcessorTxArgs, lastUsedNonce int64) (*ethTypes.Transaction, uint64, error)
+	// BuildTransactionV2 builds the transaction based on SendTxArgs, returns the transaction and the used nonce (lastUsedNonce is -1 if it's the first tx)
+	BuildTransactionV2(sendArgs *wallettypes.SendTxArgs, lastUsedNonce int64) (*ethTypes.Transaction, uint64, error)
 }
 
 type PathProcessorClearable interface {
@@ -56,8 +62,8 @@ type ProcessorInputParams struct {
 
 	// for testing purposes
 	TestsMode                 bool
-	TestEstimationMap         map[string]uint64   // [brifge-name, estimated-value]
-	TestBonderFeeMap          map[string]*big.Int // [token-symbol, bonder-fee]
+	TestEstimationMap         map[string]requests.Estimation // [bridge-name, estimation]
+	TestBonderFeeMap          map[string]*big.Int            // [token-symbol, bonder-fee]
 	TestApprovalGasEstimation uint64
 	TestApprovalL1Fee         uint64
 }

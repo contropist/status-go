@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	gethcommon "github.com/ethereum/go-ethereum/common"
+	gocommon "github.com/status-im/status-go/common"
 	"github.com/status-im/status-go/eth-node/types"
 	enstypes "github.com/status-im/status-go/eth-node/types/ens"
 	"github.com/status-im/status-go/protocol/common"
@@ -90,7 +91,7 @@ func (v *Verifier) SetOnline(online bool) {
 }
 
 func (v *Verifier) verifyLoop() {
-
+	defer gocommon.LogOnPanic()
 	ticker := time.NewTicker(30 * time.Second)
 	for {
 		select {
@@ -137,7 +138,7 @@ func (v *Verifier) ReverseResolve(address gethcommon.Address) (string, error) {
 
 // Verify verifies that a registered ENS name matches the expected public key
 func (v *Verifier) verify(rpcEndpoint, contractAddress string) error {
-	v.logger.Debug("verifying ENS Names", zap.String("endpoint", rpcEndpoint))
+	v.logger.Debug("verifying ENS Names")
 	verifier := v.node.NewENSVerifier(v.logger)
 
 	var ensDetails []enstypes.ENSDetails

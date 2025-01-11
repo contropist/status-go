@@ -9,18 +9,17 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/event"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p"
 	gethrpc "github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/status-im/status-go/account"
+	"github.com/status-im/status-go/logutils"
 	"github.com/status-im/status-go/multiaccounts/accounts"
 	"github.com/status-im/status-go/params"
 	protocolCommon "github.com/status-im/status-go/protocol/common"
 	"github.com/status-im/status-go/rpc"
 	"github.com/status-im/status-go/server"
-	"github.com/status-im/status-go/services/ens"
-	"github.com/status-im/status-go/services/stickers"
+	"github.com/status-im/status-go/services/ens/ensresolver"
 	"github.com/status-im/status-go/services/wallet/activity"
 	"github.com/status-im/status-go/services/wallet/balance"
 	"github.com/status-im/status-go/services/wallet/blockchainstate"
@@ -30,6 +29,9 @@ import (
 	"github.com/status-im/status-go/services/wallet/history"
 	"github.com/status-im/status-go/services/wallet/market"
 	"github.com/status-im/status-go/services/wallet/onramp"
+	"github.com/status-im/status-go/services/wallet/routeexecution"
+	"github.com/status-im/status-go/services/wallet/router"
+	"github.com/status-im/status-go/services/wallet/router/pathprocessor"
 	"github.com/status-im/status-go/services/wallet/thirdparty"
 	"github.com/status-im/status-go/services/wallet/thirdparty/alchemy"
 	"github.com/status-im/status-go/services/wallet/thirdparty/coingecko"
@@ -57,8 +59,7 @@ func NewService(
 	gethManager *account.GethManager,
 	transactor *transactions.Transactor,
 	config *params.NodeConfig,
-	ens *ens.Service,
-	stickers *stickers.Service,
+	ensResolver *ensresolver.EnsResolver,
 	pendingTxManager *transactions.PendingTxTracker,
 	feed *event.Feed,
 	mediaServer *server.MediaServer,
@@ -105,10 +106,23 @@ func NewService(
 	tokenManager.Start()
 
 	cryptoOnRampProviders := []onramp.Provider{
-		onramp.NewMercuryoProvider(tokenManager),
 		onramp.NewRampProvider(),
 		onramp.NewMoonPayProvider(),
 	}
+
+	featureFlags := &protocolCommon.FeatureFlags{}
+	if config.WalletConfig.EnableCelerBridge {
+		featureFlags.EnableCelerBridge = true
+	}
+
+	if config.WalletConfig.EnableMercuryoProvider {
+		featureFlags.EnableMercuryoProvider = true
+	}
+
+	if featureFlags.EnableMercuryoProvider {
+		cryptoOnRampProviders = append(cryptoOnRampProviders, onramp.NewMercuryoProvider(tokenManager))
+	}
+
 	cryptoOnRampManager := onramp.NewManager(cryptoOnRampProviders)
 
 	savedAddressesManager := &SavedAddressesManager{db: db}
@@ -183,10 +197,14 @@ func NewService(
 
 	activity := activity.NewService(db, accountsDB, tokenManager, collectiblesManager, feed, pendingTxManager)
 
-	featureFlags := &protocolCommon.FeatureFlags{}
-	if config.WalletConfig.EnableCelerBridge {
-		featureFlags.EnableCelerBridge = true
+	router := router.NewRouter(rpcClient, transactor, tokenManager, marketManager, collectibles,
+		collectiblesManager)
+	pathProcessors := buildPathProcessors(rpcClient, transactor, tokenManager, ensResolver, featureFlags)
+	for _, processor := range pathProcessors {
+		router.AddPathProcessor(processor)
 	}
+
+	routeExecutionManager := routeexecution.NewManager(db, feed, router, transactionManager, transferController)
 
 	return &Service{
 		db:                    db,
@@ -204,8 +222,6 @@ func NewService(
 		gethManager:           gethManager,
 		marketManager:         marketManager,
 		transactor:            transactor,
-		ens:                   ens,
-		stickers:              stickers,
 		feed:                  feed,
 		signals:               signals,
 		reader:                reader,
@@ -217,7 +233,54 @@ func NewService(
 		keycardPairings:       NewKeycardPairings(),
 		config:                config,
 		featureFlags:          featureFlags,
+		router:                router,
+		routeExecutionManager: routeExecutionManager,
 	}
+}
+
+func buildPathProcessors(
+	rpcClient *rpc.Client,
+	transactor *transactions.Transactor,
+	tokenManager *token.Manager,
+	ensResolver *ensresolver.EnsResolver,
+	featureFlags *protocolCommon.FeatureFlags,
+) []pathprocessor.PathProcessor {
+	ret := make([]pathprocessor.PathProcessor, 0)
+
+	transfer := pathprocessor.NewTransferProcessor(rpcClient, transactor)
+	ret = append(ret, transfer)
+
+	erc721Transfer := pathprocessor.NewERC721Processor(rpcClient, transactor)
+	ret = append(ret, erc721Transfer)
+
+	erc1155Transfer := pathprocessor.NewERC1155Processor(rpcClient, transactor)
+	ret = append(ret, erc1155Transfer)
+
+	hop := pathprocessor.NewHopBridgeProcessor(rpcClient, transactor, tokenManager, rpcClient.NetworkManager)
+	ret = append(ret, hop)
+
+	if featureFlags.EnableCelerBridge {
+		// TODO: Celar Bridge is out of scope for 2.30, check it thoroughly once we decide to include it again
+		cbridge := pathprocessor.NewCelerBridgeProcessor(rpcClient, transactor, tokenManager)
+		ret = append(ret, cbridge)
+	}
+
+	paraswap := pathprocessor.NewSwapParaswapProcessor(rpcClient, transactor, tokenManager)
+	ret = append(ret, paraswap)
+
+	ensRegister := pathprocessor.NewENSRegisterProcessor(rpcClient, transactor, ensResolver)
+	ret = append(ret, ensRegister)
+
+	ensRelease := pathprocessor.NewENSReleaseProcessor(rpcClient, transactor, ensResolver)
+	ret = append(ret, ensRelease)
+
+	ensPublicKey := pathprocessor.NewENSPublicKeyProcessor(rpcClient, transactor, ensResolver)
+	ret = append(ret, ensPublicKey)
+
+	buyStickers := pathprocessor.NewStickersBuyProcessor(rpcClient, transactor)
+	ret = append(ret, buyStickers)
+
+	return ret
 }
 
 // Service is a wallet service.
@@ -238,8 +301,6 @@ type Service struct {
 	collectibles          *collectibles.Service
 	gethManager           *account.GethManager
 	transactor            *transactions.Transactor
-	ens                   *ens.Service
-	stickers              *stickers.Service
 	feed                  *event.Feed
 	signals               *walletevent.SignalsTransmitter
 	reader                *Reader
@@ -251,6 +312,8 @@ type Service struct {
 	keycardPairings       *KeycardPairings
 	config                *params.NodeConfig
 	featureFlags          *protocolCommon.FeatureFlags
+	router                *router.Router
+	routeExecutionManager *routeexecution.Manager
 }
 
 // Start signals transmitter.
@@ -271,7 +334,8 @@ func (s *Service) SetWalletCommunityInfoProvider(provider thirdparty.CommunityIn
 
 // Stop reactor and close db.
 func (s *Service) Stop() error {
-	log.Info("wallet will be stopped")
+	logutils.ZapLogger().Info("wallet will be stopped")
+	s.router.Stop()
 	s.signals.Stop()
 	s.transferController.Stop()
 	s.currency.Stop()
@@ -281,7 +345,7 @@ func (s *Service) Stop() error {
 	s.collectibles.Stop()
 	s.tokenManager.Stop()
 	s.started = false
-	log.Info("wallet stopped")
+	logutils.ZapLogger().Info("wallet stopped")
 	return nil
 }
 
@@ -340,12 +404,4 @@ func (s *Service) GetCollectiblesService() *collectibles.Service {
 
 func (s *Service) GetCollectiblesManager() *collectibles.Manager {
 	return s.collectiblesManager
-}
-
-func (s *Service) GetEnsService() *ens.Service {
-	return s.ens
-}
-
-func (s *Service) GetStickersService() *stickers.Service {
-	return s.stickers
 }

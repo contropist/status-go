@@ -12,29 +12,57 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/status-im/status-go/common"
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/protocol/transport"
 	"github.com/status-im/status-go/wakuv2"
 
+	wps "github.com/waku-org/go-waku/waku/v2/peerstore"
+
 	v2protocol "github.com/waku-org/go-waku/waku/v2/protocol"
 
 	v1protocol "github.com/status-im/status-go/protocol/v1"
+	v2common "github.com/status-im/status-go/wakuv2/common"
 )
 
 type TelemetryType string
 
 const (
-	ProtocolStatsMetric        TelemetryType = "ProtocolStats"
-	ReceivedEnvelopeMetric     TelemetryType = "ReceivedEnvelope"
-	SentEnvelopeMetric         TelemetryType = "SentEnvelope"
-	UpdateEnvelopeMetric       TelemetryType = "UpdateEnvelope"
-	ReceivedMessagesMetric     TelemetryType = "ReceivedMessages"
+	// Bandwidth as reported by libp2p
+	ProtocolStatsMetric TelemetryType = "ProtocolStats"
+	// Envelopes sent by this node
+	SentEnvelopeMetric TelemetryType = "SentEnvelope"
+	// Change in status of a sent envelope (usually processing errors)
+	UpdateEnvelopeMetric TelemetryType = "UpdateEnvelope"
+	// Messages received by this node
+	ReceivedMessagesMetric TelemetryType = "ReceivedMessages"
+	// Errors encountered when sending envelopes
 	ErrorSendingEnvelopeMetric TelemetryType = "ErrorSendingEnvelope"
-	PeerCountMetric            TelemetryType = "PeerCount"
-	PeerConnFailuresMetric     TelemetryType = "PeerConnFailure"
-
-	MaxRetryCache = 5000
+	// Total connections for this node at a given time
+	PeerCountMetric TelemetryType = "PeerCount"
+	// Number of failed peer connections for this node at a given time
+	PeerConnFailuresMetric TelemetryType = "PeerConnFailure"
+	// Store confirmation for a sent message successful
+	MessageCheckSuccessMetric TelemetryType = "MessageCheckSuccess"
+	// Store confirmation for a sent message failed
+	MessageCheckFailureMetric TelemetryType = "MessageCheckFailure"
+	// Total connections for this node per shard at a given time
+	PeerCountByShardMetric TelemetryType = "PeerCountByShard"
+	// Total connections for this node per discovery origin at a given time
+	PeerCountByOriginMetric TelemetryType = "PeerCountByOrigin"
+	// Error encountered when attempting to dial a peer
+	DialFailureMetric TelemetryType = "DialFailure"
+	// Missed message as detected by periodic store query
+	MissedMessageMetric TelemetryType = "MissedMessages"
+	// Missed message with a relevant filter
+	MissedRelevantMessageMetric TelemetryType = "MissedRelevantMessages"
+	// MVDS ack received for a sent message
+	MessageDeliveryConfirmedMetric TelemetryType = "MessageDeliveryConfirmed"
+	// Total number and size of Waku messages sent by this node
+	SentMessageTotalMetric TelemetryType = "SentMessageTotal"
 )
+
+const MaxRetryCache = 5000
 
 type TelemetryRequest struct {
 	Id            int              `json:"id"`
@@ -59,8 +87,10 @@ func (c *Client) PushErrorSendingEnvelope(ctx context.Context, errorSendingEnvel
 }
 
 func (c *Client) PushPeerCount(ctx context.Context, peerCount int) {
-	if peerCount != c.lastPeerCount {
+	now := time.Now()
+	if peerCount != c.lastPeerCount && now.Sub(c.lastPeerCountTime) > 1*time.Second {
 		c.lastPeerCount = peerCount
+		c.lastPeerCountTime = now
 		c.processAndPushTelemetry(ctx, PeerCount{PeerCount: peerCount})
 	}
 }
@@ -77,6 +107,50 @@ func (c *Client) PushPeerConnFailures(ctx context.Context, peerConnFailures map[
 	}
 }
 
+func (c *Client) PushMessageCheckSuccess(ctx context.Context, messageHash string) {
+	c.processAndPushTelemetry(ctx, MessageCheckSuccess{MessageHash: messageHash})
+}
+
+func (c *Client) PushMessageCheckFailure(ctx context.Context, messageHash string) {
+	c.processAndPushTelemetry(ctx, MessageCheckFailure{MessageHash: messageHash})
+}
+
+func (c *Client) PushPeerCountByShard(ctx context.Context, peerCountByShard map[uint16]uint) {
+	for shard, count := range peerCountByShard {
+		c.processAndPushTelemetry(ctx, PeerCountByShard{Shard: shard, Count: count})
+	}
+}
+
+func (c *Client) PushPeerCountByOrigin(ctx context.Context, peerCountByOrigin map[wps.Origin]uint) {
+	for origin, count := range peerCountByOrigin {
+		c.processAndPushTelemetry(ctx, PeerCountByOrigin{Origin: origin, Count: count})
+	}
+}
+
+func (c *Client) PushDialFailure(ctx context.Context, dialFailure v2common.DialError) {
+	var errorMessage string = ""
+	if dialFailure.ErrType == v2common.ErrorUnknown {
+		errorMessage = dialFailure.ErrMsg
+	}
+	c.processAndPushTelemetry(ctx, DialFailure{ErrorType: dialFailure.ErrType, ErrorMsg: errorMessage, Protocols: dialFailure.Protocols})
+}
+
+func (c *Client) PushMissedMessage(ctx context.Context, envelope *v2protocol.Envelope) {
+	c.processAndPushTelemetry(ctx, MissedMessage{Envelope: envelope})
+}
+
+func (c *Client) PushMissedRelevantMessage(ctx context.Context, receivedMessage *v2common.ReceivedMessage) {
+	c.processAndPushTelemetry(ctx, MissedRelevantMessage{ReceivedMessage: receivedMessage})
+}
+
+func (c *Client) PushMessageDeliveryConfirmed(ctx context.Context, messageHash string) {
+	c.processAndPushTelemetry(ctx, MessageDeliveryConfirmed{MessageHash: messageHash})
+}
+
+func (c *Client) PushSentMessageTotal(ctx context.Context, messageSize uint32) {
+	c.processAndPushTelemetry(ctx, SentMessageTotal{Size: messageSize})
+}
+
 type ReceivedMessages struct {
 	Filter     transport.Filter
 	SSHMessage *types.Message
@@ -90,6 +164,46 @@ type PeerCount struct {
 type PeerConnFailure struct {
 	FailedPeerId string
 	FailureCount int
+}
+
+type MessageCheckSuccess struct {
+	MessageHash string
+}
+
+type MessageCheckFailure struct {
+	MessageHash string
+}
+
+type PeerCountByShard struct {
+	Shard uint16
+	Count uint
+}
+
+type PeerCountByOrigin struct {
+	Origin wps.Origin
+	Count  uint
+}
+
+type DialFailure struct {
+	ErrorType v2common.DialErrorType
+	ErrorMsg  string
+	Protocols string
+}
+
+type MissedMessage struct {
+	Envelope *v2protocol.Envelope
+}
+
+type MissedRelevantMessage struct {
+	ReceivedMessage *v2common.ReceivedMessage
+}
+
+type MessageDeliveryConfirmed struct {
+	MessageHash string
+}
+
+type SentMessageTotal struct {
+	Size uint32
 }
 
 type Client struct {
@@ -108,7 +222,9 @@ type Client struct {
 	nextId               int
 	sendPeriod           time.Duration
 	lastPeerCount        int
+	lastPeerCountTime    time.Time
 	lastPeerConnFailures map[string]int
+	deviceType           string
 }
 
 type TelemetryClientOption func(*Client)
@@ -142,6 +258,7 @@ func NewClient(logger *zap.Logger, serverURL string, keyUID string, nodeName str
 		nextIdLock:           sync.Mutex{},
 		sendPeriod:           10 * time.Second, // default value
 		lastPeerCount:        0,
+		lastPeerCountTime:    time.Time{},
 		lastPeerConnFailures: make(map[string]int),
 	}
 
@@ -152,8 +269,13 @@ func NewClient(logger *zap.Logger, serverURL string, keyUID string, nodeName str
 	return client
 }
 
+func (c *Client) SetDeviceType(deviceType string) {
+	c.deviceType = deviceType
+}
+
 func (c *Client) Start(ctx context.Context) {
 	go func() {
+		defer common.LogOnPanic()
 		for {
 			select {
 			case telemetryRequest := <-c.telemetryCh:
@@ -166,6 +288,7 @@ func (c *Client) Start(ctx context.Context) {
 		}
 	}()
 	go func() {
+		defer common.LogOnPanic()
 		sendPeriod := c.sendPeriod
 		timer := time.NewTimer(sendPeriod)
 		defer timer.Stop()
@@ -207,12 +330,6 @@ func (c *Client) processAndPushTelemetry(ctx context.Context, data interface{}) 
 			TelemetryType: ReceivedMessagesMetric,
 			TelemetryData: c.ProcessReceivedMessages(v),
 		}
-	case *v2protocol.Envelope:
-		telemetryRequest = TelemetryRequest{
-			Id:            c.nextId,
-			TelemetryType: ReceivedEnvelopeMetric,
-			TelemetryData: c.ProcessReceivedEnvelope(v),
-		}
 	case wakuv2.SentEnvelope:
 		telemetryRequest = TelemetryRequest{
 			Id:            c.nextId,
@@ -236,6 +353,60 @@ func (c *Client) processAndPushTelemetry(ctx context.Context, data interface{}) 
 			Id:            c.nextId,
 			TelemetryType: PeerConnFailuresMetric,
 			TelemetryData: c.ProcessPeerConnFailure(v),
+		}
+	case MessageCheckSuccess:
+		telemetryRequest = TelemetryRequest{
+			Id:            c.nextId,
+			TelemetryType: MessageCheckSuccessMetric,
+			TelemetryData: c.ProcessMessageCheckSuccess(v),
+		}
+	case MessageCheckFailure:
+		telemetryRequest = TelemetryRequest{
+			Id:            c.nextId,
+			TelemetryType: MessageCheckFailureMetric,
+			TelemetryData: c.ProcessMessageCheckFailure(v),
+		}
+	case PeerCountByShard:
+		telemetryRequest = TelemetryRequest{
+			Id:            c.nextId,
+			TelemetryType: PeerCountByShardMetric,
+			TelemetryData: c.ProcessPeerCountByShard(v),
+		}
+	case PeerCountByOrigin:
+		telemetryRequest = TelemetryRequest{
+			Id:            c.nextId,
+			TelemetryType: PeerCountByOriginMetric,
+			TelemetryData: c.ProcessPeerCountByOrigin(v),
+		}
+	case DialFailure:
+		telemetryRequest = TelemetryRequest{
+			Id:            c.nextId,
+			TelemetryType: DialFailureMetric,
+			TelemetryData: c.ProcessDialFailure(v),
+		}
+	case MissedMessage:
+		telemetryRequest = TelemetryRequest{
+			Id:            c.nextId,
+			TelemetryType: MissedMessageMetric,
+			TelemetryData: c.ProcessMissedMessage(v),
+		}
+	case MissedRelevantMessage:
+		telemetryRequest = TelemetryRequest{
+			Id:            c.nextId,
+			TelemetryType: MissedRelevantMessageMetric,
+			TelemetryData: c.ProcessMissedRelevantMessage(v),
+		}
+	case MessageDeliveryConfirmed:
+		telemetryRequest = TelemetryRequest{
+			Id:            c.nextId,
+			TelemetryType: MessageDeliveryConfirmedMetric,
+			TelemetryData: c.ProcessMessageDeliveryConfirmed(v),
+		}
+	case SentMessageTotal:
+		telemetryRequest = TelemetryRequest{
+			Id:            c.nextId,
+			TelemetryType: SentMessageTotalMetric,
+			TelemetryData: c.ProcessSentMessageTotal(v),
 		}
 	default:
 		c.logger.Error("Unknown telemetry data type")
@@ -287,39 +458,30 @@ func (c *Client) pushTelemetryRequest(request []TelemetryRequest) error {
 	return nil
 }
 
+func (c *Client) commonPostBody() map[string]interface{} {
+	return map[string]interface{}{
+		"nodeName":      c.nodeName,
+		"peerId":        c.peerId,
+		"statusVersion": c.version,
+		"deviceType":    c.deviceType,
+		"timestamp":     time.Now().Unix(),
+	}
+}
+
 func (c *Client) ProcessReceivedMessages(receivedMessages ReceivedMessages) *json.RawMessage {
 	var postBody []map[string]interface{}
 	for _, message := range receivedMessages.Messages {
-		postBody = append(postBody, map[string]interface{}{
-			"chatId":         receivedMessages.Filter.ChatID,
-			"messageHash":    types.EncodeHex(receivedMessages.SSHMessage.Hash),
-			"messageId":      message.ApplicationLayer.ID,
-			"sentAt":         receivedMessages.SSHMessage.Timestamp,
-			"pubsubTopic":    receivedMessages.Filter.PubsubTopic,
-			"topic":          receivedMessages.Filter.ContentTopic.String(),
-			"messageType":    message.ApplicationLayer.Type.String(),
-			"receiverKeyUID": c.keyUID,
-			"peerId":         c.peerId,
-			"nodeName":       c.nodeName,
-			"messageSize":    len(receivedMessages.SSHMessage.Payload),
-			"statusVersion":  c.version,
-		})
-	}
-	body, _ := json.Marshal(postBody)
-	jsonRawMessage := json.RawMessage(body)
-	return &jsonRawMessage
-}
-
-func (c *Client) ProcessReceivedEnvelope(envelope *v2protocol.Envelope) *json.RawMessage {
-	postBody := map[string]interface{}{
-		"messageHash":    envelope.Hash().String(),
-		"sentAt":         uint32(envelope.Message().GetTimestamp() / int64(time.Second)),
-		"pubsubTopic":    envelope.PubsubTopic(),
-		"topic":          envelope.Message().ContentTopic,
-		"receiverKeyUID": c.keyUID,
-		"peerId":         c.peerId,
-		"nodeName":       c.nodeName,
-		"statusVersion":  c.version,
+		messageBody := c.commonPostBody()
+		messageBody["chatId"] = receivedMessages.Filter.ChatID
+		messageBody["messageHash"] = types.EncodeHex(receivedMessages.SSHMessage.Hash)
+		messageBody["messageId"] = message.ApplicationLayer.ID
+		messageBody["sentAt"] = receivedMessages.SSHMessage.Timestamp
+		messageBody["pubsubTopic"] = receivedMessages.Filter.PubsubTopic
+		messageBody["topic"] = receivedMessages.Filter.ContentTopic.String()
+		messageBody["messageType"] = message.ApplicationLayer.Type.String()
+		messageBody["receiverKeyUID"] = c.keyUID
+		messageBody["messageSize"] = len(receivedMessages.SSHMessage.Payload)
+		postBody = append(postBody, messageBody)
 	}
 	body, _ := json.Marshal(postBody)
 	jsonRawMessage := json.RawMessage(body)
@@ -327,70 +489,119 @@ func (c *Client) ProcessReceivedEnvelope(envelope *v2protocol.Envelope) *json.Ra
 }
 
 func (c *Client) ProcessSentEnvelope(sentEnvelope wakuv2.SentEnvelope) *json.RawMessage {
-	postBody := map[string]interface{}{
-		"messageHash":   sentEnvelope.Envelope.Hash().String(),
-		"sentAt":        uint32(sentEnvelope.Envelope.Message().GetTimestamp() / int64(time.Second)),
-		"pubsubTopic":   sentEnvelope.Envelope.PubsubTopic(),
-		"topic":         sentEnvelope.Envelope.Message().ContentTopic,
-		"senderKeyUID":  c.keyUID,
-		"peerId":        c.peerId,
-		"nodeName":      c.nodeName,
-		"publishMethod": sentEnvelope.PublishMethod.String(),
-		"statusVersion": c.version,
-	}
-	body, _ := json.Marshal(postBody)
-	jsonRawMessage := json.RawMessage(body)
-	return &jsonRawMessage
+	postBody := c.commonPostBody()
+	postBody["messageHash"] = sentEnvelope.Envelope.Hash().String()
+	postBody["sentAt"] = uint32(sentEnvelope.Envelope.Message().GetTimestamp() / int64(time.Second))
+	postBody["pubsubTopic"] = sentEnvelope.Envelope.PubsubTopic()
+	postBody["topic"] = sentEnvelope.Envelope.Message().ContentTopic
+	postBody["senderKeyUID"] = c.keyUID
+	postBody["publishMethod"] = sentEnvelope.PublishMethod.String()
+	return c.marshalPostBody(postBody)
 }
 
 func (c *Client) ProcessErrorSendingEnvelope(errorSendingEnvelope wakuv2.ErrorSendingEnvelope) *json.RawMessage {
-	postBody := map[string]interface{}{
-		"messageHash":   errorSendingEnvelope.SentEnvelope.Envelope.Hash().String(),
-		"sentAt":        uint32(errorSendingEnvelope.SentEnvelope.Envelope.Message().GetTimestamp() / int64(time.Second)),
-		"pubsubTopic":   errorSendingEnvelope.SentEnvelope.Envelope.PubsubTopic(),
-		"topic":         errorSendingEnvelope.SentEnvelope.Envelope.Message().ContentTopic,
-		"senderKeyUID":  c.keyUID,
-		"peerId":        c.peerId,
-		"nodeName":      c.nodeName,
-		"publishMethod": errorSendingEnvelope.SentEnvelope.PublishMethod.String(),
-		"statusVersion": c.version,
-		"error":         errorSendingEnvelope.Error.Error(),
-	}
-	body, _ := json.Marshal(postBody)
-	jsonRawMessage := json.RawMessage(body)
-	return &jsonRawMessage
+	postBody := c.commonPostBody()
+	postBody["messageHash"] = errorSendingEnvelope.SentEnvelope.Envelope.Hash().String()
+	postBody["sentAt"] = uint32(errorSendingEnvelope.SentEnvelope.Envelope.Message().GetTimestamp() / int64(time.Second))
+	postBody["pubsubTopic"] = errorSendingEnvelope.SentEnvelope.Envelope.PubsubTopic()
+	postBody["topic"] = errorSendingEnvelope.SentEnvelope.Envelope.Message().ContentTopic
+	postBody["senderKeyUID"] = c.keyUID
+	postBody["publishMethod"] = errorSendingEnvelope.SentEnvelope.PublishMethod.String()
+	postBody["error"] = errorSendingEnvelope.Error.Error()
+	return c.marshalPostBody(postBody)
 }
 
 func (c *Client) ProcessPeerCount(peerCount PeerCount) *json.RawMessage {
-	postBody := map[string]interface{}{
-		"peerCount":     peerCount.PeerCount,
-		"nodeName":      c.nodeName,
-		"nodeKeyUID":    c.keyUID,
-		"peerId":        c.peerId,
-		"statusVersion": c.version,
-		"timestamp":     time.Now().Unix(),
-	}
-	body, _ := json.Marshal(postBody)
-	jsonRawMessage := json.RawMessage(body)
-	return &jsonRawMessage
+	postBody := c.commonPostBody()
+	postBody["peerCount"] = peerCount.PeerCount
+	return c.marshalPostBody(postBody)
 }
 
 func (c *Client) ProcessPeerConnFailure(peerConnFailure PeerConnFailure) *json.RawMessage {
-	postBody := map[string]interface{}{
-		"failedPeerId":  peerConnFailure.FailedPeerId,
-		"failureCount":  peerConnFailure.FailureCount,
-		"nodeName":      c.nodeName,
-		"nodeKeyUID":    c.keyUID,
-		"peerId":        c.peerId,
-		"statusVersion": c.version,
-		"timestamp":     time.Now().Unix(),
+	postBody := c.commonPostBody()
+	postBody["failedPeerId"] = peerConnFailure.FailedPeerId
+	postBody["failureCount"] = peerConnFailure.FailureCount
+	postBody["nodeKeyUID"] = c.keyUID
+	return c.marshalPostBody(postBody)
+}
+
+func (c *Client) ProcessMessageCheckSuccess(messageCheckSuccess MessageCheckSuccess) *json.RawMessage {
+	postBody := c.commonPostBody()
+	postBody["messageHash"] = messageCheckSuccess.MessageHash
+	return c.marshalPostBody(postBody)
+}
+
+func (c *Client) ProcessPeerCountByShard(peerCountByShard PeerCountByShard) *json.RawMessage {
+	postBody := c.commonPostBody()
+	postBody["shard"] = peerCountByShard.Shard
+	postBody["count"] = peerCountByShard.Count
+	return c.marshalPostBody(postBody)
+}
+
+func (c *Client) ProcessMessageCheckFailure(messageCheckFailure MessageCheckFailure) *json.RawMessage {
+	postBody := c.commonPostBody()
+	postBody["messageHash"] = messageCheckFailure.MessageHash
+	return c.marshalPostBody(postBody)
+}
+
+func (c *Client) ProcessPeerCountByOrigin(peerCountByOrigin PeerCountByOrigin) *json.RawMessage {
+	postBody := c.commonPostBody()
+	postBody["origin"] = peerCountByOrigin.Origin
+	postBody["count"] = peerCountByOrigin.Count
+	return c.marshalPostBody(postBody)
+}
+
+func (c *Client) ProcessDialFailure(dialFailure DialFailure) *json.RawMessage {
+	postBody := c.commonPostBody()
+	postBody["errorType"] = dialFailure.ErrorType
+	postBody["errorMsg"] = dialFailure.ErrorMsg
+	postBody["protocols"] = dialFailure.Protocols
+	return c.marshalPostBody(postBody)
+}
+
+func (c *Client) ProcessMissedMessage(missedMessage MissedMessage) *json.RawMessage {
+	postBody := c.commonPostBody()
+	postBody["messageHash"] = missedMessage.Envelope.Hash().String()
+	postBody["sentAt"] = uint32(missedMessage.Envelope.Message().GetTimestamp() / int64(time.Second))
+	postBody["pubsubTopic"] = missedMessage.Envelope.PubsubTopic()
+	postBody["contentTopic"] = missedMessage.Envelope.Message().ContentTopic
+	return c.marshalPostBody(postBody)
+}
+
+func (c *Client) ProcessMissedRelevantMessage(missedMessage MissedRelevantMessage) *json.RawMessage {
+	postBody := c.commonPostBody()
+	postBody["messageHash"] = missedMessage.ReceivedMessage.Envelope.Hash().String()
+	postBody["sentAt"] = missedMessage.ReceivedMessage.Sent
+	postBody["pubsubTopic"] = missedMessage.ReceivedMessage.PubsubTopic
+	postBody["contentTopic"] = missedMessage.ReceivedMessage.ContentTopic
+	return c.marshalPostBody(postBody)
+}
+
+func (c *Client) ProcessMessageDeliveryConfirmed(messageDeliveryConfirmed MessageDeliveryConfirmed) *json.RawMessage {
+	postBody := c.commonPostBody()
+	postBody["messageHash"] = messageDeliveryConfirmed.MessageHash
+	return c.marshalPostBody(postBody)
+}
+
+func (c *Client) ProcessSentMessageTotal(sentMessageTotal SentMessageTotal) *json.RawMessage {
+	postBody := c.commonPostBody()
+	postBody["size"] = sentMessageTotal.Size
+	return c.marshalPostBody(postBody)
+}
+
+// Helper function to marshal post body and handle errors
+func (c *Client) marshalPostBody(postBody map[string]interface{}) *json.RawMessage {
+	body, err := json.Marshal(postBody)
+	if err != nil {
+		c.logger.Error("Error marshaling post body", zap.Error(err))
+		return nil
 	}
-	body, _ := json.Marshal(postBody)
 	jsonRawMessage := json.RawMessage(body)
 	return &jsonRawMessage
 }
 
 func (c *Client) UpdateEnvelopeProcessingError(shhMessage *types.Message, processingError error) {
+	defer common.LogOnPanic()
 	c.logger.Debug("Pushing envelope update to telemetry server", zap.String("hash", types.EncodeHex(shhMessage.Hash)))
 	url := fmt.Sprintf("%s/update-envelope", c.serverURL)
 	var errorString = ""
@@ -406,6 +617,7 @@ func (c *Client) UpdateEnvelopeProcessingError(shhMessage *types.Message, proces
 		"peerId":          c.peerId,
 		"nodeName":        c.nodeName,
 		"processingError": errorString,
+		"deviceType":      c.deviceType,
 	}
 	body, _ := json.Marshal(postBody)
 	_, err := c.httpClient.Post(url, "application/json", bytes.NewBuffer(body))

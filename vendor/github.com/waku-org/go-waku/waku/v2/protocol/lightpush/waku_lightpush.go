@@ -13,6 +13,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	libp2pProtocol "github.com/libp2p/go-libp2p/core/protocol"
+	"github.com/libp2p/go-libp2p/p2p/net/swarm"
 	"github.com/libp2p/go-msgio/pbio"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/waku-org/go-waku/logging"
@@ -24,7 +25,6 @@ import (
 	"github.com/waku-org/go-waku/waku/v2/protocol/relay"
 	"github.com/waku-org/go-waku/waku/v2/utils"
 	"go.uber.org/zap"
-	"golang.org/x/time/rate"
 )
 
 // LightPushID_v20beta1 is the current Waku LightPush protocol identifier
@@ -40,7 +40,7 @@ var (
 type WakuLightPush struct {
 	h       host.Host
 	relay   *relay.WakuRelay
-	limiter *rate.Limiter
+	limiter *utils.RateLimiter
 	cancel  context.CancelFunc
 	pm      *peermanager.PeerManager
 	metrics Metrics
@@ -59,11 +59,12 @@ func NewWakuLightPush(relay *relay.WakuRelay, pm *peermanager.PeerManager, reg p
 	wakuLP.metrics = newMetrics(reg)
 
 	params := &LightpushParameters{}
+	opts = append(DefaultLightpushOptions(), opts...)
 	for _, opt := range opts {
 		opt(params)
 	}
 
-	wakuLP.limiter = params.limiter
+	wakuLP.limiter = utils.NewRateLimiter(params.limitR, params.limitB)
 
 	return wakuLP
 }
@@ -106,7 +107,7 @@ func (wakuLP *WakuLightPush) onRequest(ctx context.Context) func(network.Stream)
 			Response: &pb.PushResponse{},
 		}
 
-		if wakuLP.limiter != nil && !wakuLP.limiter.Allow() {
+		if !wakuLP.limiter.Allow(stream.Conn().RemotePeer()) {
 			wakuLP.metrics.RecordError(rateLimitFailure)
 			responseMsg := "exceeds the rate limit"
 			responsePushRPC.Response.Info = &responseMsg
@@ -195,10 +196,13 @@ func (wakuLP *WakuLightPush) request(ctx context.Context, req *pb.PushRequest, p
 
 	stream, err := wakuLP.h.NewStream(ctx, peerID, LightPushID_v20beta1)
 	if err != nil {
-		logger.Error("creating stream to peer", zap.Error(err))
 		wakuLP.metrics.RecordError(dialFailure)
-		if ps, ok := wakuLP.h.Peerstore().(peerstore.WakuPeerstore); ok {
-			ps.AddConnFailure(peerID)
+		if wakuLP.pm != nil {
+			wakuLP.pm.HandleDialError(err, peerID)
+			if errors.Is(err, swarm.ErrAllDialsFailed) ||
+				errors.Is(err, swarm.ErrDialBackoff) || errors.Is(err, swarm.ErrNoAddresses) {
+				wakuLP.pm.CheckAndRemoveBadPeer(peerID)
+			}
 		}
 		return nil, err
 	}
@@ -335,6 +339,7 @@ func (wakuLP *WakuLightPush) Publish(ctx context.Context, message *wpb.WakuMessa
 	for i, peerID := range params.selectedPeers {
 		wg.Add(1)
 		go func(index int, id peer.ID) {
+			defer utils.LogOnPanic()
 			paramsValue := *params
 			paramsValue.requestID = protocol.GenerateRequestID()
 			defer wg.Done()

@@ -107,7 +107,7 @@ func (s *SyncDeviceSuite) prepareBackendWithAccount(mnemonic, tmpdir string) *ap
 }
 
 func (s *SyncDeviceSuite) prepareBackendWithoutAccount(tmpdir string) *api.GethStatusBackend {
-	backend := api.NewGethStatusBackend()
+	backend := api.NewGethStatusBackend(s.logger)
 	backend.UpdateRootDataDir(tmpdir)
 	return backend
 }
@@ -155,10 +155,7 @@ func (s *SyncDeviceSuite) pairAccounts(serverBackend *api.GethStatusBackend, ser
 		ClientConfig: new(ClientConfig),
 	}
 
-	clientConfigBytes, err := json.Marshal(clientPayloadSourceConfig)
-	require.NoError(s.T(), err)
-
-	err = StartUpReceivingClient(clientBackend, connectionString, string(clientConfigBytes))
+	err = StartUpReceivingClient(clientBackend, connectionString, &clientPayloadSourceConfig)
 	require.NoError(s.T(), err)
 
 	require.True(s.T(), serverBackend.Messenger().HasPairedDevices())
@@ -279,18 +276,19 @@ func (s *SyncDeviceSuite) TestPairingSyncDeviceClientAsSender() {
 	clientActiveAccount, err := clientBackend.GetActiveAccount()
 	require.NoError(s.T(), err)
 	clientKeystorePath := filepath.Join(clientTmpDir, api.DefaultKeystoreRelativePath, clientActiveAccount.KeyUID)
-	clientPayloadSourceConfig := SenderClientConfig{
-		SenderConfig: &SenderConfig{
-			KeystorePath: clientKeystorePath,
-			DeviceType:   "android",
-			KeyUID:       clientActiveAccount.KeyUID,
-			Password:     s.password,
-		},
-		ClientConfig: new(ClientConfig),
+
+	makeNewSenderClientConfig := func() *SenderClientConfig {
+		return &SenderClientConfig{
+			SenderConfig: &SenderConfig{
+				KeystorePath: clientKeystorePath,
+				DeviceType:   "android",
+				KeyUID:       clientActiveAccount.KeyUID,
+				Password:     s.password,
+			},
+			ClientConfig: new(ClientConfig),
+		}
 	}
-	clientConfigBytes, err := json.Marshal(clientPayloadSourceConfig)
-	require.NoError(s.T(), err)
-	err = StartUpSendingClient(clientBackend, cs, string(clientConfigBytes))
+	err = StartUpSendingClient(clientBackend, cs, makeNewSenderClientConfig())
 	require.NoError(s.T(), err)
 
 	// check that the server has the same data as the client
@@ -339,7 +337,7 @@ func (s *SyncDeviceSuite) TestPairingSyncDeviceClientAsSender() {
 	// repeat local pairing, we should expect no error after receiver logged in
 	cs, err = StartUpReceiverServer(serverBackend, string(serverConfigBytes))
 	require.NoError(s.T(), err)
-	err = StartUpSendingClient(clientBackend, cs, string(clientConfigBytes))
+	err = StartUpSendingClient(clientBackend, cs, makeNewSenderClientConfig())
 	require.NoError(s.T(), err)
 	require.True(s.T(), clientMessenger.HasPairedDevices())
 	require.True(s.T(), serverMessenger.HasPairedDevices())
@@ -348,7 +346,7 @@ func (s *SyncDeviceSuite) TestPairingSyncDeviceClientAsSender() {
 	require.NoError(s.T(), serverBackend.Logout())
 	cs, err = StartUpReceiverServer(serverBackend, string(serverConfigBytes))
 	require.NoError(s.T(), err)
-	err = StartUpSendingClient(clientBackend, cs, string(clientConfigBytes))
+	err = StartUpSendingClient(clientBackend, cs, makeNewSenderClientConfig())
 	require.NoError(s.T(), err)
 }
 
@@ -418,19 +416,19 @@ func (s *SyncDeviceSuite) TestPairingSyncDeviceClientAsReceiver() {
 	err = clientBackend.OpenAccounts()
 	require.NoError(s.T(), err)
 
-	clientPayloadSourceConfig := ReceiverClientConfig{
-		ReceiverConfig: &ReceiverConfig{
-			CreateAccount: &requests.CreateAccount{
-				RootDataDir:   clientTmpDir,
-				KdfIterations: expectedKDFIterations,
-				DeviceName:    "device-1",
+	makeNewReceiverClientConfig := func() *ReceiverClientConfig {
+		return &ReceiverClientConfig{
+			ReceiverConfig: &ReceiverConfig{
+				CreateAccount: &requests.CreateAccount{
+					RootDataDir:   clientTmpDir,
+					KdfIterations: expectedKDFIterations,
+					DeviceName:    "device-1",
+				},
 			},
-		},
-		ClientConfig: new(ClientConfig),
+			ClientConfig: new(ClientConfig),
+		}
 	}
-	clientConfigBytes, err := json.Marshal(clientPayloadSourceConfig)
-	require.NoError(s.T(), err)
-	err = StartUpReceivingClient(clientBackend, cs, string(clientConfigBytes))
+	err = StartUpReceivingClient(clientBackend, cs, makeNewReceiverClientConfig())
 	require.NoError(s.T(), err)
 
 	// check that the client has the same data as the server
@@ -478,7 +476,7 @@ func (s *SyncDeviceSuite) TestPairingSyncDeviceClientAsReceiver() {
 	// repeat local pairing, we should expect no error after receiver logged in
 	cs, err = StartUpSenderServer(serverBackend, string(configBytes))
 	require.NoError(s.T(), err)
-	err = StartUpReceivingClient(clientBackend, cs, string(clientConfigBytes))
+	err = StartUpReceivingClient(clientBackend, cs, makeNewReceiverClientConfig())
 	require.NoError(s.T(), err)
 	require.True(s.T(), serverMessenger.HasPairedDevices())
 	require.True(s.T(), clientMessenger.HasPairedDevices())
@@ -487,7 +485,7 @@ func (s *SyncDeviceSuite) TestPairingSyncDeviceClientAsReceiver() {
 	require.NoError(s.T(), clientBackend.Logout())
 	cs, err = StartUpSenderServer(serverBackend, string(configBytes))
 	require.NoError(s.T(), err)
-	err = StartUpReceivingClient(clientBackend, cs, string(clientConfigBytes))
+	err = StartUpReceivingClient(clientBackend, cs, makeNewReceiverClientConfig())
 	require.NoError(s.T(), err)
 }
 
@@ -621,7 +619,7 @@ func (s *SyncDeviceSuite) TestPairPendingContactRequest() {
 type contactRequestAction func(messenger *protocol.Messenger, contactRequestID string) (*protocol.MessengerResponse, error)
 type notificationValidateFunc func(r *protocol.ActivityCenterPaginationResponse)
 
-func (s *SyncDeviceSuite) testPairContactRequest(requestAction contactRequestAction, validateFunc notificationValidateFunc) {
+func (s *SyncDeviceSuite) testPairContactRequest(requestAction contactRequestAction, validateFunc notificationValidateFunc, validateFuncPaired notificationValidateFunc) {
 	bobBackend, _ := s.createUser("bob")
 	defer func() {
 		s.Require().NoError(bobBackend.Logout())
@@ -650,7 +648,7 @@ func (s *SyncDeviceSuite) testPairContactRequest(requestAction contactRequestAct
 	}()
 	s.pairAccounts(alice1Backend, alice1TmpDir, alice2Backend, alice2TmpDir)
 
-	internalNotificationValidateFunc := func(m *protocol.Messenger) {
+	internalNotificationValidateFunc := func(m *protocol.Messenger, isPairedDevice bool) {
 		acRequest := protocol.ActivityCenterNotificationsRequest{
 			ActivityTypes: []protocol.ActivityCenterType{
 				protocol.ActivityCenterNotificationTypeContactRequest,
@@ -660,35 +658,51 @@ func (s *SyncDeviceSuite) testPairContactRequest(requestAction contactRequestAct
 		}
 		r, err := m.ActivityCenterNotifications(acRequest)
 		s.Require().NoError(err)
-		validateFunc(r)
+		if isPairedDevice {
+			validateFuncPaired(r)
+		} else {
+			validateFunc(r)
+		}
 	}
 
-	internalNotificationValidateFunc(alice1Backend.Messenger())
-	internalNotificationValidateFunc(alice2Backend.Messenger())
+	internalNotificationValidateFunc(alice1Backend.Messenger(), false)
+	internalNotificationValidateFunc(alice2Backend.Messenger(), true)
 }
 
 func (s *SyncDeviceSuite) TestPairDeclineContactRequest() {
 	declineContactRequest := func(messenger *protocol.Messenger, contactRequestID string) (*protocol.MessengerResponse, error) {
 		return messenger.DeclineContactRequest(context.Background(), &requests.DeclineContactRequest{ID: types.Hex2Bytes(contactRequestID)})
 	}
-	s.testPairContactRequest(declineContactRequest, func(r *protocol.ActivityCenterPaginationResponse) {
+	validateFunc := func(r *protocol.ActivityCenterPaginationResponse) {
 		s.Require().Len(r.Notifications, 1)
 		s.Require().False(r.Notifications[0].Accepted)
 		s.Require().True(r.Notifications[0].Dismissed)
 		s.Require().True(r.Notifications[0].Read)
-	})
+	}
+	s.testPairContactRequest(
+		declineContactRequest,
+		validateFunc,
+		// The paired device will get a notification because the request will not be fulfilled (not mutual)
+		validateFunc,
+	)
 }
 
 func (s *SyncDeviceSuite) TestPairAcceptContactRequest() {
 	acceptContactRequest := func(messenger *protocol.Messenger, contactRequestID string) (*protocol.MessengerResponse, error) {
 		return messenger.AcceptContactRequest(context.Background(), &requests.AcceptContactRequest{ID: types.Hex2Bytes(contactRequestID)})
 	}
-	s.testPairContactRequest(acceptContactRequest, func(r *protocol.ActivityCenterPaginationResponse) {
-		s.Require().Len(r.Notifications, 1)
-		s.Require().True(r.Notifications[0].Accepted)
-		s.Require().False(r.Notifications[0].Dismissed)
-		s.Require().True(r.Notifications[0].Read)
-	})
+	s.testPairContactRequest(
+		acceptContactRequest,
+		func(r *protocol.ActivityCenterPaginationResponse) {
+			s.Require().Len(r.Notifications, 1)
+			s.Require().True(r.Notifications[0].Accepted)
+			s.Require().False(r.Notifications[0].Dismissed)
+			s.Require().True(r.Notifications[0].Read)
+		},
+		// The paired device doesn't need a notification because it will receive the fully mutual contact
+		func(r *protocol.ActivityCenterPaginationResponse) {
+			s.Require().Len(r.Notifications, 0)
+		})
 }
 
 type testTimeSource struct{}
@@ -849,9 +863,7 @@ func (s *SyncDeviceSuite) TestTransferringKeystoreFiles() {
 		},
 		ClientConfig: new(ClientConfig),
 	}
-	clientConfigBytes, err := json.Marshal(clientPayloadSourceConfig)
-	require.NoError(s.T(), err)
-	err = StartUpKeystoreFilesReceivingClient(clientBackend, cs, string(clientConfigBytes))
+	err = StartUpKeystoreFilesReceivingClient(clientBackend, cs, &clientPayloadSourceConfig)
 	require.NoError(s.T(), err)
 
 	// check client - client should contain keystore files for imported seed phrase
@@ -907,7 +919,7 @@ func (s *SyncDeviceSuite) TestTransferringKeystoreFilesAfterStopUisngKeycard() {
 	s.Require().NoError(err)
 	err = clientMessenger.SetInstallationMetadata(settings.InstallationID, im1)
 	s.Require().NoError(err)
-	response, err := clientMessenger.SendPairInstallation(context.Background(), nil)
+	response, err := clientMessenger.SendPairInstallation(context.Background(), "", nil)
 	s.Require().NoError(err)
 	s.Require().NotNil(response)
 	s.Require().Len(response.Chats(), 1)
@@ -940,7 +952,7 @@ func (s *SyncDeviceSuite) TestTransferringKeystoreFilesAfterStopUisngKeycard() {
 	}
 	s.Require().True(found)
 
-	err = serverMessenger.EnableInstallation(settings.InstallationID)
+	_, err = serverMessenger.EnableInstallation(settings.InstallationID)
 	s.Require().NoError(err)
 
 	// Check if the logged in account is the same on server and client
@@ -1157,9 +1169,7 @@ func (s *SyncDeviceSuite) TestTransferringKeystoreFilesAfterStopUisngKeycard() {
 		},
 		ClientConfig: new(ClientConfig),
 	}
-	clientConfigBytes, err := json.Marshal(clientPayloadSourceConfig)
-	require.NoError(s.T(), err)
-	err = StartUpKeystoreFilesReceivingClient(clientBackend, cs, string(clientConfigBytes))
+	err = StartUpKeystoreFilesReceivingClient(clientBackend, cs, &clientPayloadSourceConfig)
 	require.NoError(s.T(), err)
 
 	// Check server - server should contain keystore files for imported seed phrase
@@ -1212,9 +1222,7 @@ func (s *SyncDeviceSuite) TestPreventLoggedInAccountLocalPairingClientAsReceiver
 		},
 		ClientConfig: new(ClientConfig),
 	}
-	clientConfigBytes, err := json.Marshal(clientPayloadSourceConfig)
-	s.NoError(err)
-	err = StartUpReceivingClient(clientBackend, cs, string(clientConfigBytes))
+	err = StartUpReceivingClient(clientBackend, cs, &clientPayloadSourceConfig)
 	s.ErrorIs(err, ErrLoggedInKeyUIDConflict)
 }
 
@@ -1256,8 +1264,6 @@ func (s *SyncDeviceSuite) TestPreventLoggedInAccountLocalPairingClientAsSender()
 		},
 		ClientConfig: new(ClientConfig),
 	}
-	clientConfigBytes, err := json.Marshal(clientPayloadSourceConfig)
-	s.NoError(err)
-	err = StartUpSendingClient(clientBackend, cs, string(clientConfigBytes))
+	err = StartUpSendingClient(clientBackend, cs, &clientPayloadSourceConfig)
 	s.ErrorContains(err, "[client] status not ok when sending account data, received '500 Internal Server Error'")
 }

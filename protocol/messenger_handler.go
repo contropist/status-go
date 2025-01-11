@@ -9,6 +9,10 @@ import (
 	"sync"
 	"time"
 
+	gethcommon "github.com/ethereum/go-ethereum/common"
+
+	gocommon "github.com/status-im/status-go/common"
+	"github.com/status-im/status-go/services/accounts/accountsevent"
 	"github.com/status-im/status-go/services/browsers"
 	"github.com/status-im/status-go/signal"
 
@@ -292,7 +296,7 @@ func (m *Messenger) createMessageNotification(chat *Chat, messageState *Received
 	notification := &ActivityCenterNotification{
 		ID:          types.FromHex(chat.ID),
 		Name:        chat.Name,
-		LastMessage: message,
+		Message:     message,
 		Type:        notificationType,
 		Author:      messageState.CurrentMessageState.Contact.ID,
 		Timestamp:   messageState.CurrentMessageState.WhisperTimestamp,
@@ -474,6 +478,10 @@ func (m *Messenger) handleCommandMessage(state *ReceivedMessageState, message *c
 }
 
 func (m *Messenger) syncContactRequestForInstallationContact(contact *Contact, state *ReceivedMessageState, chat *Chat, outgoing bool) error {
+	if contact.mutual() {
+		// We only need to generate a contact request if we are not mutual
+		return nil
+	}
 
 	if chat == nil {
 		return fmt.Errorf("no chat restored during the contact synchronisation, contact.ID = %s", contact.ID)
@@ -1317,6 +1325,8 @@ func (m *Messenger) HandleSyncPairInstallation(state *ReceivedMessageState, mess
 	// TODO(samyoul) remove storing of an updated reference pointer?
 	state.AllInstallations.Store(message.InstallationId, installation)
 	state.ModifiedInstallations.Store(message.InstallationId, true)
+	targeted := message.TargetInstallationId == m.installationID
+	state.TargetedInstallations.Store(message.InstallationId, targeted)
 
 	return nil
 }
@@ -1364,7 +1374,7 @@ func (m *Messenger) HandleHistoryArchiveMagnetlinkMessage(state *ReceivedMessage
 			currentTask := m.archiveManager.GetHistoryArchiveDownloadTask(id.String())
 
 			go func(currentTask *communities.HistoryArchiveDownloadTask, communityID types.HexBytes) {
-
+				defer gocommon.LogOnPanic()
 				// Cancel ongoing download/import task
 				if currentTask != nil && !currentTask.IsCancelled() {
 					currentTask.Cancel()
@@ -1696,7 +1706,7 @@ func (m *Messenger) HandleCommunityRequestToJoinResponse(state *ReceivedMessageS
 		communityShardKey := &protobuf.CommunityShardKey{
 			CommunityId: requestToJoinResponseProto.CommunityId,
 			PrivateKey:  requestToJoinResponseProto.ProtectedTopicPrivateKey,
-			Clock:       requestToJoinResponseProto.Community.Clock,
+			Clock:       community.Clock(),
 			Shard:       requestToJoinResponseProto.Shard,
 		}
 
@@ -1739,7 +1749,7 @@ func (m *Messenger) HandleCommunityRequestToJoinResponse(state *ReceivedMessageS
 
 			currentTask := m.archiveManager.GetHistoryArchiveDownloadTask(community.IDString())
 			go func(currentTask *communities.HistoryArchiveDownloadTask) {
-
+				defer gocommon.LogOnPanic()
 				// Cancel ongoing download/import task
 				if currentTask != nil && !currentTask.IsCancelled() {
 					currentTask.Cancel()
@@ -1761,9 +1771,6 @@ func (m *Messenger) HandleCommunityRequestToJoinResponse(state *ReceivedMessageS
 
 				m.downloadAndImportHistoryArchives(community.ID(), magnetlink, task.CancelChan)
 			}(currentTask)
-
-			clock := requestToJoinResponseProto.Community.ArchiveMagnetlinkClock
-			return m.communitiesManager.UpdateMagnetlinkMessageClock(community.ID(), clock)
 		}
 	}
 
@@ -2371,6 +2378,7 @@ func (m *Messenger) handleChatMessage(state *ReceivedMessageState, forceSeen boo
 		m.logger.Warn("failed to add peersyncing message", zap.Error(err))
 	}
 
+	receivedAContactRequest := false
 	// If we receive some propagated state from someone who's not
 	// our paired device, we handle it
 	if receivedMessage.ContactRequestPropagatedState != nil && !isSyncMessage {
@@ -2382,6 +2390,7 @@ func (m *Messenger) handleChatMessage(state *ReceivedMessageState, forceSeen boo
 			}
 		}
 		if result.newContactRequestReceived {
+			receivedAContactRequest = true
 
 			if contact.hasAddedUs() && !contact.mutual() {
 				receivedMessage.ContactRequestState = common.ContactRequestStatePending
@@ -2404,9 +2413,26 @@ func (m *Messenger) handleChatMessage(state *ReceivedMessageState, forceSeen boo
 			}
 			state.Response.AddMessage(updateMessage)
 
-			err = m.createIncomingContactRequestNotification(contact, state, receivedMessage, true)
-			if err != nil {
-				return err
+			if !contact.mutual() {
+				// Only create the notification if we are not mutual yet
+				err = m.createIncomingContactRequestNotification(contact, state, receivedMessage, true)
+				if err != nil {
+					return err
+				}
+			} else {
+				// We already sent a contact request, so we can mark the old notification as Accepted
+				notification, err := m.persistence.GetActivityCenterNotificationByTypeAuthorAndChatID(ActivityCenterNotificationTypeContactRequest, m.myHexIdentity(), contact.ID)
+				if err != nil {
+					return err
+				}
+				if notification != nil && notification.Message.ContactRequestState != common.ContactRequestStateAccepted {
+					notification.Message.ContactRequestState = common.ContactRequestStateAccepted
+					notification.UpdatedAt = m.GetCurrentTimeInMillis()
+					err = m.addActivityCenterNotification(state.Response, notification, nil)
+					if err != nil {
+						return err
+					}
+				}
 			}
 		}
 		state.ModifiedContacts.Store(contact.ID, true)
@@ -2426,7 +2452,7 @@ func (m *Messenger) handleChatMessage(state *ReceivedMessageState, forceSeen boo
 			chatContact.CustomizationColor = multiaccountscommon.IDToColorFallbackToBlue(receivedMessage.CustomizationColor)
 		}
 
-		if chatContact.mutual() || chatContact.dismissed() {
+		if (!receivedAContactRequest && chatContact.mutual()) || chatContact.dismissed() {
 			m.logger.Info("ignoring contact request message for a mutual or dismissed contact")
 			return nil
 		}
@@ -3376,6 +3402,18 @@ func (m *Messenger) handleSyncWatchOnlyAccount(message *protobuf.SyncAccount, fr
 		return nil, err
 	}
 
+	if m.config.accountsFeed != nil {
+		var eventType accountsevent.EventType
+		if acc.Removed {
+			eventType = accountsevent.EventTypeRemoved
+		} else {
+			eventType = accountsevent.EventTypeAdded
+		}
+		m.config.accountsFeed.Send(accountsevent.Event{
+			Type:     eventType,
+			Accounts: []gethcommon.Address{gethcommon.Address(acc.Address)},
+		})
+	}
 	return acc, nil
 }
 
@@ -3676,6 +3714,40 @@ func (m *Messenger) handleSyncKeypair(message *protobuf.SyncKeypair, fromLocalPa
 	if err != nil {
 		return nil, err
 	}
+
+	if m.config.accountsFeed != nil {
+		addedAddresses := []gethcommon.Address{}
+		removedAddresses := []gethcommon.Address{}
+		if dbKeypair.Removed {
+			for _, acc := range dbKeypair.Accounts {
+				removedAddresses = append(removedAddresses, gethcommon.Address(acc.Address))
+			}
+		} else {
+			for _, acc := range dbKeypair.Accounts {
+				if acc.Chat {
+					continue
+				}
+				if acc.Removed {
+					removedAddresses = append(removedAddresses, gethcommon.Address(acc.Address))
+				} else {
+					addedAddresses = append(addedAddresses, gethcommon.Address(acc.Address))
+				}
+			}
+		}
+		if len(addedAddresses) > 0 {
+			m.config.accountsFeed.Send(accountsevent.Event{
+				Type:     accountsevent.EventTypeAdded,
+				Accounts: addedAddresses,
+			})
+		}
+		if len(removedAddresses) > 0 {
+			m.config.accountsFeed.Send(accountsevent.Event{
+				Type:     accountsevent.EventTypeRemoved,
+				Accounts: removedAddresses,
+			})
+		}
+	}
+
 	return dbKeypair, nil
 }
 

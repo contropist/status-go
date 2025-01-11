@@ -3,18 +3,20 @@ package gethbridge
 import (
 	"context"
 	"crypto/ecdsa"
-	"errors"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/waku-org/go-waku/waku/v2/api/history"
 	"github.com/waku-org/go-waku/waku/v2/protocol"
 	"github.com/waku-org/go-waku/waku/v2/protocol/store"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/p2p/enode"
+
+	gocommon "github.com/status-im/status-go/common"
 	"github.com/status-im/status-go/connection"
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/wakuv2"
@@ -76,6 +78,7 @@ func (w *gethWakuV2Wrapper) GetCurrentTime() time.Time {
 func (w *gethWakuV2Wrapper) SubscribeEnvelopeEvents(eventsProxy chan<- types.EnvelopeEvent) types.Subscription {
 	events := make(chan wakucommon.EnvelopeEvent, 100) // must be buffered to prevent blocking whisper
 	go func() {
+		defer gocommon.LogOnPanic()
 		for e := range events {
 			eventsProxy <- *NewWakuV2EnvelopeEventWrapper(&e)
 		}
@@ -174,57 +177,6 @@ func (w *gethWakuV2Wrapper) createFilterWrapper(id string, keyAsym *ecdsa.Privat
 	}, id), nil
 }
 
-// DEPRECATED: Not used in waku V2
-func (w *gethWakuV2Wrapper) SendMessagesRequest(peerID []byte, r types.MessagesRequest) error {
-	return errors.New("DEPRECATED")
-}
-
-func (w *gethWakuV2Wrapper) RequestStoreMessages(ctx context.Context, peerIDBytes []byte, r types.MessagesRequest, processEnvelopes bool) (types.StoreRequestCursor, int, error) {
-	var options []store.RequestOption
-
-	var peerID peer.ID
-	err := peerID.Unmarshal(peerIDBytes)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	options = []store.RequestOption{
-		store.WithPaging(false, uint64(r.Limit)),
-	}
-
-	var cursor []byte
-	if r.StoreCursor != nil {
-		cursor = r.StoreCursor
-	}
-
-	contentTopics := []string{}
-	for _, topic := range r.ContentTopics {
-		contentTopics = append(contentTopics, wakucommon.BytesToTopic(topic).ContentTopic())
-	}
-
-	query := store.FilterCriteria{
-		TimeStart:     proto.Int64(int64(r.From) * int64(time.Second)),
-		TimeEnd:       proto.Int64(int64(r.To) * int64(time.Second)),
-		ContentFilter: protocol.NewContentFilter(w.waku.GetPubsubTopic(r.PubsubTopic), contentTopics...),
-	}
-
-	pbCursor, envelopesCount, err := w.waku.Query(ctx, peerID, query, cursor, options, processEnvelopes)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	if pbCursor != nil {
-		return pbCursor, envelopesCount, nil
-	}
-
-	return nil, envelopesCount, nil
-}
-
-// DEPRECATED: Not used in waku V2
-func (w *gethWakuV2Wrapper) RequestHistoricMessagesWithTimeout(peerID []byte, envelope types.Envelope, timeout time.Duration) error {
-	return errors.New("DEPRECATED")
-}
-
 func (w *gethWakuV2Wrapper) StartDiscV5() error {
 	return w.waku.StartDiscV5()
 }
@@ -305,7 +257,7 @@ func (w *gethWakuV2Wrapper) SubscribeToConnStatusChanges() (*types.ConnStatusSub
 func (w *gethWakuV2Wrapper) SetCriteriaForMissingMessageVerification(peerID peer.ID, pubsubTopic string, contentTopics []types.TopicType) error {
 	var cTopics []string
 	for _, ct := range contentTopics {
-		cTopics = append(cTopics, wakucommon.TopicType(ct).ContentTopic())
+		cTopics = append(cTopics, wakucommon.BytesToTopic(ct.Bytes()).ContentTopic())
 	}
 	pubsubTopic = w.waku.GetPubsubTopic(pubsubTopic)
 	w.waku.SetTopicsToVerifyForMissingMessages(peerID, pubsubTopic, cTopics)
@@ -354,10 +306,71 @@ func (w *gethWakuV2Wrapper) ConfirmMessageDelivered(hashes []common.Hash) {
 	w.waku.ConfirmMessageDelivered(hashes)
 }
 
-func (w *gethWakuV2Wrapper) SetStorePeerID(peerID peer.ID) {
-	w.waku.SetStorePeerID(peerID)
-}
-
 func (w *gethWakuV2Wrapper) PeerID() peer.ID {
 	return w.waku.PeerID()
+}
+
+func (w *gethWakuV2Wrapper) GetActiveStorenode() peer.ID {
+	return w.waku.StorenodeCycle.GetActiveStorenode()
+}
+
+func (w *gethWakuV2Wrapper) OnStorenodeChanged() <-chan peer.ID {
+	return w.waku.StorenodeCycle.StorenodeChangedEmitter.Subscribe()
+}
+
+func (w *gethWakuV2Wrapper) OnStorenodeNotWorking() <-chan struct{} {
+	return w.waku.StorenodeCycle.StorenodeNotWorkingEmitter.Subscribe()
+}
+
+func (w *gethWakuV2Wrapper) OnStorenodeAvailable() <-chan peer.ID {
+	return w.waku.StorenodeCycle.StorenodeAvailableEmitter.Subscribe()
+}
+
+func (w *gethWakuV2Wrapper) WaitForAvailableStoreNode(ctx context.Context) bool {
+	return w.waku.StorenodeCycle.WaitForAvailableStoreNode(ctx)
+}
+
+func (w *gethWakuV2Wrapper) SetStorenodeConfigProvider(c history.StorenodeConfigProvider) {
+	w.waku.StorenodeCycle.SetStorenodeConfigProvider(c)
+}
+
+func (w *gethWakuV2Wrapper) ProcessMailserverBatch(
+	ctx context.Context,
+	batch types.MailserverBatch,
+	storenodeID peer.ID,
+	pageLimit uint64,
+	shouldProcessNextPage func(int) (bool, uint64),
+	processEnvelopes bool,
+) error {
+	pubsubTopic := w.waku.GetPubsubTopic(batch.PubsubTopic)
+	contentTopics := []string{}
+	for _, topic := range batch.Topics {
+		contentTopics = append(contentTopics, wakucommon.BytesToTopic(topic.Bytes()).ContentTopic())
+	}
+
+	criteria := store.FilterCriteria{
+		TimeStart:     proto.Int64(batch.From.UnixNano()),
+		TimeEnd:       proto.Int64(batch.To.UnixNano()),
+		ContentFilter: protocol.NewContentFilter(pubsubTopic, contentTopics...),
+	}
+
+	return w.waku.HistoryRetriever.Query(ctx, criteria, storenodeID, pageLimit, shouldProcessNextPage, processEnvelopes)
+}
+
+func (w *gethWakuV2Wrapper) IsStorenodeAvailable(peerID peer.ID) bool {
+	return w.waku.StorenodeCycle.IsStorenodeAvailable(peerID)
+}
+
+func (w *gethWakuV2Wrapper) PerformStorenodeTask(fn func() error, opts ...history.StorenodeTaskOption) error {
+	return w.waku.StorenodeCycle.PerformStorenodeTask(fn, opts...)
+}
+
+func (w *gethWakuV2Wrapper) DisconnectActiveStorenode(ctx context.Context, backoff time.Duration, shouldCycle bool) {
+	w.waku.StorenodeCycle.Lock()
+	defer w.waku.StorenodeCycle.Unlock()
+
+	w.waku.StorenodeCycle.DisconnectActiveStorenode(backoff)
+	if shouldCycle {
+		w.waku.StorenodeCycle.Cycle(ctx)
+	}
 }

@@ -6,11 +6,11 @@ import (
 	"math/big"
 
 	"github.com/pkg/errors"
+	"go.uber.org/zap"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/status-im/status-go/contracts/community-tokens/assets"
 	"github.com/status-im/status-go/contracts/community-tokens/collectibles"
 	communitytokendeployer "github.com/status-im/status-go/contracts/community-tokens/deployer"
@@ -19,11 +19,13 @@ import (
 	"github.com/status-im/status-go/eth-node/crypto"
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/images"
+	"github.com/status-im/status-go/logutils"
 	"github.com/status-im/status-go/protocol/communities/token"
 	"github.com/status-im/status-go/protocol/protobuf"
 	"github.com/status-im/status-go/services/utils"
 	"github.com/status-im/status-go/services/wallet/bigint"
 	wcommon "github.com/status-im/status-go/services/wallet/common"
+	"github.com/status-im/status-go/services/wallet/wallettypes"
 	"github.com/status-im/status-go/transactions"
 )
 
@@ -100,16 +102,16 @@ func (d *DeploymentParameters) Validate(isAsset bool) error {
 	return nil
 }
 
-func (api *API) DeployCollectibles(ctx context.Context, chainID uint64, deploymentParameters DeploymentParameters, txArgs transactions.SendTxArgs, password string) (DeploymentDetails, error) {
+func (api *API) DeployCollectibles(ctx context.Context, chainID uint64, deploymentParameters DeploymentParameters, txArgs wallettypes.SendTxArgs, password string) (DeploymentDetails, error) {
 	err := deploymentParameters.Validate(false)
 	if err != nil {
 		return DeploymentDetails{}, err
 	}
-	transactOpts := txArgs.ToTransactOpts(utils.GetSigner(chainID, api.s.accountsManager, api.s.config.KeyStoreDir, txArgs.From, password))
+	transactOpts := txArgs.ToTransactOpts(utils.VerifyPasswordAndGetSigner(chainID, api.s.accountsManager, api.s.config.KeyStoreDir, txArgs.From, password))
 
 	ethClient, err := api.s.manager.rpcClient.EthClient(chainID)
 	if err != nil {
-		log.Error(err.Error())
+		logutils.ZapLogger().Error(err.Error())
 		return DeploymentDetails{}, err
 	}
 	address, tx, _, err := collectibles.DeployCollectibles(transactOpts, ethClient, deploymentParameters.Name,
@@ -118,7 +120,7 @@ func (api *API) DeployCollectibles(ctx context.Context, chainID uint64, deployme
 		deploymentParameters.TokenURI, common.HexToAddress(deploymentParameters.OwnerTokenAddress),
 		common.HexToAddress(deploymentParameters.MasterTokenAddress))
 	if err != nil {
-		log.Error(err.Error())
+		logutils.ZapLogger().Error(err.Error())
 		return DeploymentDetails{}, err
 	}
 
@@ -132,7 +134,7 @@ func (api *API) DeployCollectibles(ctx context.Context, chainID uint64, deployme
 		"",
 	)
 	if err != nil {
-		log.Error("TrackPendingTransaction error", "error", err)
+		logutils.ZapLogger().Error("TrackPendingTransaction error", zap.Error(err))
 		return DeploymentDetails{}, err
 	}
 
@@ -179,7 +181,7 @@ func prepareDeploymentSignatureStruct(signature string, communityID string, addr
 
 func (api *API) DeployOwnerToken(ctx context.Context, chainID uint64,
 	ownerTokenParameters DeploymentParameters, masterTokenParameters DeploymentParameters,
-	signerPubKey string, txArgs transactions.SendTxArgs, password string) (DeploymentDetails, error) {
+	signerPubKey string, txArgs wallettypes.SendTxArgs, password string) (DeploymentDetails, error) {
 	err := ownerTokenParameters.Validate(false)
 	if err != nil {
 		return DeploymentDetails{}, err
@@ -194,7 +196,7 @@ func (api *API) DeployOwnerToken(ctx context.Context, chainID uint64,
 		return DeploymentDetails{}, err
 	}
 
-	transactOpts := txArgs.ToTransactOpts(utils.GetSigner(chainID, api.s.accountsManager, api.s.config.KeyStoreDir, txArgs.From, password))
+	transactOpts := txArgs.ToTransactOpts(utils.VerifyPasswordAndGetSigner(chainID, api.s.accountsManager, api.s.config.KeyStoreDir, txArgs.From, password))
 
 	deployerContractInst, err := api.NewCommunityTokenDeployerInstance(chainID)
 	if err != nil {
@@ -223,16 +225,16 @@ func (api *API) DeployOwnerToken(ctx context.Context, chainID uint64,
 		return DeploymentDetails{}, err
 	}
 
-	log.Debug("Signature:", communitySignature)
+	logutils.ZapLogger().Debug("Prepare deployment", zap.Any("signature", communitySignature))
 
 	tx, err := deployerContractInst.Deploy(transactOpts, ownerTokenConfig, masterTokenConfig, communitySignature, common.FromHex(signerPubKey))
 
 	if err != nil {
-		log.Error(err.Error())
+		logutils.ZapLogger().Error(err.Error())
 		return DeploymentDetails{}, err
 	}
 
-	log.Debug("Contract deployed hash:", tx.Hash().String())
+	logutils.ZapLogger().Debug("Contract deployed", zap.Stringer("hash", tx.Hash()))
 
 	err = api.s.pendingTracker.TrackPendingTransaction(
 		wcommon.ChainID(chainID),
@@ -244,7 +246,7 @@ func (api *API) DeployOwnerToken(ctx context.Context, chainID uint64,
 		"",
 	)
 	if err != nil {
-		log.Error("TrackPendingTransaction error", "error", err)
+		logutils.ZapLogger().Error("TrackPendingTransaction error", zap.Error(err))
 		return DeploymentDetails{}, err
 	}
 
@@ -271,18 +273,18 @@ func (api *API) ReTrackOwnerTokenDeploymentTransaction(ctx context.Context, chai
 	return api.s.ReTrackOwnerTokenDeploymentTransaction(ctx, chainID, contractAddress)
 }
 
-func (api *API) DeployAssets(ctx context.Context, chainID uint64, deploymentParameters DeploymentParameters, txArgs transactions.SendTxArgs, password string) (DeploymentDetails, error) {
+func (api *API) DeployAssets(ctx context.Context, chainID uint64, deploymentParameters DeploymentParameters, txArgs wallettypes.SendTxArgs, password string) (DeploymentDetails, error) {
 
 	err := deploymentParameters.Validate(true)
 	if err != nil {
 		return DeploymentDetails{}, err
 	}
 
-	transactOpts := txArgs.ToTransactOpts(utils.GetSigner(chainID, api.s.accountsManager, api.s.config.KeyStoreDir, txArgs.From, password))
+	transactOpts := txArgs.ToTransactOpts(utils.VerifyPasswordAndGetSigner(chainID, api.s.accountsManager, api.s.config.KeyStoreDir, txArgs.From, password))
 
 	ethClient, err := api.s.manager.rpcClient.EthClient(chainID)
 	if err != nil {
-		log.Error(err.Error())
+		logutils.ZapLogger().Error(err.Error())
 		return DeploymentDetails{}, err
 	}
 
@@ -293,7 +295,7 @@ func (api *API) DeployAssets(ctx context.Context, chainID uint64, deploymentPara
 		common.HexToAddress(deploymentParameters.OwnerTokenAddress),
 		common.HexToAddress(deploymentParameters.MasterTokenAddress))
 	if err != nil {
-		log.Error(err.Error())
+		logutils.ZapLogger().Error(err.Error())
 		return DeploymentDetails{}, err
 	}
 
@@ -307,7 +309,7 @@ func (api *API) DeployAssets(ctx context.Context, chainID uint64, deploymentPara
 		"",
 	)
 	if err != nil {
-		log.Error("TrackPendingTransaction error", "error", err)
+		logutils.ZapLogger().Error("TrackPendingTransaction error", zap.Error(err))
 		return DeploymentDetails{}, err
 	}
 
@@ -375,14 +377,14 @@ func (api *API) NewAssetsInstance(chainID uint64, contractAddress string) (*asse
 }
 
 // Universal minting function for every type of token.
-func (api *API) MintTokens(ctx context.Context, chainID uint64, contractAddress string, txArgs transactions.SendTxArgs, password string, walletAddresses []string, amount *bigint.BigInt) (string, error) {
+func (api *API) MintTokens(ctx context.Context, chainID uint64, contractAddress string, txArgs wallettypes.SendTxArgs, password string, walletAddresses []string, amount *bigint.BigInt) (string, error) {
 
 	err := api.s.ValidateWalletsAndAmounts(walletAddresses, amount)
 	if err != nil {
 		return "", err
 	}
 
-	transactOpts := txArgs.ToTransactOpts(utils.GetSigner(chainID, api.s.accountsManager, api.s.config.KeyStoreDir, txArgs.From, password))
+	transactOpts := txArgs.ToTransactOpts(utils.VerifyPasswordAndGetSigner(chainID, api.s.accountsManager, api.s.config.KeyStoreDir, txArgs.From, password))
 
 	contractInst, err := NewTokenInstance(api.s, chainID, contractAddress)
 	if err != nil {
@@ -404,7 +406,7 @@ func (api *API) MintTokens(ctx context.Context, chainID uint64, contractAddress 
 		"",
 	)
 	if err != nil {
-		log.Error("TrackPendingTransaction error", "error", err)
+		logutils.ZapLogger().Error("TrackPendingTransaction error", zap.Error(err))
 		return "", err
 	}
 
@@ -438,13 +440,13 @@ func (api *API) RemoteDestructedAmount(ctx context.Context, chainID uint64, cont
 }
 
 // This is only ERC721 function
-func (api *API) RemoteBurn(ctx context.Context, chainID uint64, contractAddress string, txArgs transactions.SendTxArgs, password string, tokenIds []*bigint.BigInt, additionalData string) (string, error) {
+func (api *API) RemoteBurn(ctx context.Context, chainID uint64, contractAddress string, txArgs wallettypes.SendTxArgs, password string, tokenIds []*bigint.BigInt, additionalData string) (string, error) {
 	err := api.s.validateTokens(tokenIds)
 	if err != nil {
 		return "", err
 	}
 
-	transactOpts := txArgs.ToTransactOpts(utils.GetSigner(chainID, api.s.accountsManager, api.s.config.KeyStoreDir, txArgs.From, password))
+	transactOpts := txArgs.ToTransactOpts(utils.VerifyPasswordAndGetSigner(chainID, api.s.accountsManager, api.s.config.KeyStoreDir, txArgs.From, password))
 
 	var tempTokenIds []*big.Int
 	for _, v := range tokenIds {
@@ -471,7 +473,7 @@ func (api *API) RemoteBurn(ctx context.Context, chainID uint64, contractAddress 
 		additionalData,
 	)
 	if err != nil {
-		log.Error("TrackPendingTransaction error", "error", err)
+		logutils.ZapLogger().Error("TrackPendingTransaction error", zap.Error(err))
 		return "", err
 	}
 
@@ -490,13 +492,13 @@ func (api *API) RemainingSupply(ctx context.Context, chainID uint64, contractAdd
 	return api.s.remainingSupply(ctx, chainID, contractAddress)
 }
 
-func (api *API) Burn(ctx context.Context, chainID uint64, contractAddress string, txArgs transactions.SendTxArgs, password string, burnAmount *bigint.BigInt) (string, error) {
+func (api *API) Burn(ctx context.Context, chainID uint64, contractAddress string, txArgs wallettypes.SendTxArgs, password string, burnAmount *bigint.BigInt) (string, error) {
 	err := api.s.validateBurnAmount(ctx, burnAmount, chainID, contractAddress)
 	if err != nil {
 		return "", err
 	}
 
-	transactOpts := txArgs.ToTransactOpts(utils.GetSigner(chainID, api.s.accountsManager, api.s.config.KeyStoreDir, txArgs.From, password))
+	transactOpts := txArgs.ToTransactOpts(utils.VerifyPasswordAndGetSigner(chainID, api.s.accountsManager, api.s.config.KeyStoreDir, txArgs.From, password))
 
 	newMaxSupply, err := api.s.prepareNewMaxSupply(ctx, chainID, contractAddress, burnAmount)
 	if err != nil {
@@ -523,7 +525,7 @@ func (api *API) Burn(ctx context.Context, chainID uint64, contractAddress string
 		"",
 	)
 	if err != nil {
-		log.Error("TrackPendingTransaction error", "error", err)
+		logutils.ZapLogger().Error("TrackPendingTransaction error", zap.Error(err))
 		return "", err
 	}
 
@@ -545,7 +547,7 @@ func (api *API) SafeGetOwnerTokenAddress(ctx context.Context, chainID uint64, co
 	return api.s.SafeGetOwnerTokenAddress(ctx, chainID, communityID)
 }
 
-func (api *API) SetSignerPubKey(ctx context.Context, chainID uint64, contractAddress string, txArgs transactions.SendTxArgs, password string, newSignerPubKey string) (string, error) {
+func (api *API) SetSignerPubKey(ctx context.Context, chainID uint64, contractAddress string, txArgs wallettypes.SendTxArgs, password string, newSignerPubKey string) (string, error) {
 	return api.s.SetSignerPubKey(ctx, chainID, contractAddress, txArgs, password, newSignerPubKey)
 }
 

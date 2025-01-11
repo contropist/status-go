@@ -15,6 +15,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	libp2pProtocol "github.com/libp2p/go-libp2p/core/protocol"
+	"github.com/libp2p/go-libp2p/p2p/net/swarm"
 	"github.com/libp2p/go-msgio/pbio"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/waku-org/go-waku/logging"
@@ -28,6 +29,7 @@ import (
 	"github.com/waku-org/go-waku/waku/v2/protocol/subscription"
 	"github.com/waku-org/go-waku/waku/v2/service"
 	"github.com/waku-org/go-waku/waku/v2/timesource"
+	"github.com/waku-org/go-waku/waku/v2/utils"
 	"go.uber.org/zap"
 	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
@@ -53,6 +55,7 @@ type WakuFilterLightNode struct {
 	log              *zap.Logger
 	subscriptions    *subscription.SubscriptionsMap
 	pm               *peermanager.PeerManager
+	limiter          *utils.RateLimiter
 	peerPingInterval time.Duration
 }
 
@@ -88,6 +91,7 @@ func NewWakuFilterLightNode(
 	onlineChecker onlinechecker.OnlineChecker,
 	reg prometheus.Registerer,
 	log *zap.Logger,
+	opts ...LightNodeOption,
 ) *WakuFilterLightNode {
 	wf := new(WakuFilterLightNode)
 	wf.log = log.Named("filterv2-lightnode")
@@ -98,6 +102,14 @@ func NewWakuFilterLightNode(
 	wf.CommonService = service.NewCommonService()
 	wf.metrics = newMetrics(reg)
 	wf.peerPingInterval = 1 * time.Minute
+
+	params := &LightNodeParameters{}
+	opts = append(DefaultLightNodeOptions(), opts...)
+	for _, opt := range opts {
+		opt(params)
+	}
+	wf.limiter = utils.NewRateLimiter(params.limitR, params.limitB)
+
 	return wf
 }
 
@@ -127,6 +139,7 @@ func (wf *WakuFilterLightNode) Stop() {
 		wf.h.RemoveStreamHandler(FilterPushID_v20beta1)
 		if wf.subscriptions.Count() > 0 {
 			go func() {
+				defer utils.LogOnPanic()
 				defer func() {
 					_ = recover()
 				}()
@@ -153,8 +166,16 @@ func (wf *WakuFilterLightNode) onRequest(ctx context.Context) func(network.Strea
 
 		logger := wf.log.With(logging.HostID("peerID", peerID))
 
+		if !wf.limiter.Allow(peerID) {
+			wf.metrics.RecordError(rateLimitFailure)
+			if err := stream.Reset(); err != nil {
+				wf.log.Error("resetting connection", zap.Error(err))
+			}
+			return
+		}
+
 		if !wf.subscriptions.IsSubscribedTo(peerID) {
-			logger.Warn("received message push from unknown peer", logging.HostID("peerID", peerID))
+			logger.Warn("received message push from unknown peer")
 			wf.metrics.RecordError(unknownPeerMessagePush)
 			//Send a wildcard unsubscribe to this peer so that further requests are not forwarded to us
 			if err := stream.Reset(); err != nil {
@@ -245,8 +266,12 @@ func (wf *WakuFilterLightNode) request(ctx context.Context, requestID []byte,
 	stream, err := wf.h.NewStream(ctx, peerID, FilterSubscribeID_v20beta1)
 	if err != nil {
 		wf.metrics.RecordError(dialFailure)
-		if ps, ok := wf.h.Peerstore().(peerstore.WakuPeerstore); ok {
-			ps.AddConnFailure(peerID)
+		if wf.pm != nil {
+			wf.pm.HandleDialError(err, peerID)
+			if errors.Is(err, swarm.ErrAllDialsFailed) ||
+				errors.Is(err, swarm.ErrDialBackoff) || errors.Is(err, swarm.ErrNoAddresses) {
+				wf.pm.CheckAndRemoveBadPeer(peerID)
+			}
 		}
 		return err
 	}
@@ -285,7 +310,7 @@ func (wf *WakuFilterLightNode) request(ctx context.Context, requestID []byte,
 
 	}
 
-	if filterSubscribeResponse.RequestId != request.RequestId {
+	if filterSubscribeResponse.RequestId != "N/A" && filterSubscribeResponse.RequestId != request.RequestId {
 		wf.log.Error("requestID mismatch", zap.String("expected", request.RequestId), zap.String("received", filterSubscribeResponse.RequestId))
 		wf.metrics.RecordError(requestIDMismatch)
 		err := NewFilterError(300, "request_id_mismatch")
@@ -335,7 +360,7 @@ func (wf *WakuFilterLightNode) handleFilterSubscribeOptions(ctx context.Context,
 	if params.pm != nil && reqPeerCount > 0 {
 
 		wf.log.Debug("handleFilterSubscribeOptions", zap.Int("peerCount", reqPeerCount), zap.Int("excludePeersLen", len(params.peersToExclude)))
-		params.selectedPeers, err = wf.pm.SelectPeers(
+		selectedPeers, err := wf.pm.SelectPeers(
 			peermanager.PeerSelectionCriteria{
 				SelectionType: params.peerSelectionType,
 				Proto:         FilterSubscribeID_v20beta1,
@@ -348,7 +373,12 @@ func (wf *WakuFilterLightNode) handleFilterSubscribeOptions(ctx context.Context,
 		)
 		if err != nil {
 			wf.log.Error("peer selection returned err", zap.Error(err))
-			return nil, nil, err
+			if len(params.selectedPeers) == 0 {
+				return nil, nil, err
+			}
+		}
+		if len(selectedPeers) > 0 {
+			params.selectedPeers = append(params.selectedPeers, selectedPeers...)
 		}
 	}
 	wf.log.Debug("handleFilterSubscribeOptions exit", zap.Int("selectedPeerCount", len(params.selectedPeers)))
@@ -414,6 +444,7 @@ func (wf *WakuFilterLightNode) Subscribe(ctx context.Context, contentFilter prot
 		for i, peerID := range selectedPeers {
 			wg.Add(1)
 			go func(index int, ID peer.ID) {
+				defer utils.LogOnPanic()
 				defer wg.Done()
 				err := wf.request(
 					reqCtx,
@@ -565,6 +596,7 @@ func (wf *WakuFilterLightNode) Unsubscribe(ctx context.Context, contentFilter pr
 		// send unsubscribe request to all the peers
 		for peerID := range peers {
 			go func(peerID peer.ID) {
+				defer utils.LogOnPanic()
 				defer func() {
 					if params.wg != nil {
 						params.wg.Done()
@@ -687,6 +719,7 @@ func (wf *WakuFilterLightNode) unsubscribeAll(ctx context.Context, opts ...Filte
 	}
 	for peerId := range peers {
 		go func(peerID peer.ID) {
+			defer utils.LogOnPanic()
 			defer func() {
 				if params.wg != nil {
 					params.wg.Done()

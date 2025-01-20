@@ -109,10 +109,12 @@ func (t *Transactor) NextNonce(ctx context.Context, rpcClient rpc.ClientInterfac
 		return 0, err
 	}
 
-	// We need to take into consideration all pending transactions in case of Optimism, cause the network returns always
+	// We need to take into consideration all pending transactions in case of networks based on the Optimism stack, cause the network returns always
 	// the nonce of last executed tx + 1 for the next nonce value.
 	if chainID == wallet_common.OptimismMainnet ||
-		chainID == wallet_common.OptimismSepolia {
+		chainID == wallet_common.OptimismSepolia ||
+		chainID == wallet_common.BaseMainnet ||
+		chainID == wallet_common.BaseSepolia {
 		if t.pendingTracker != nil {
 			countOfPendingTXs, err := t.pendingTracker.CountPendingTxsFromNonce(wallet_common.ChainID(chainID), common.Address(from), nonce)
 			if err != nil {

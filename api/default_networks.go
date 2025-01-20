@@ -16,6 +16,8 @@ const (
 	OptimismSepoliaChainID uint64 = 11155420
 	ArbitrumChainID        uint64 = 42161
 	ArbitrumSepoliaChainID uint64 = 421614
+	BaseChainID            uint64 = 8453
+	BaseSepoliaChainID     uint64 = 84532
 	sntSymbol                     = "SNT"
 	sttSymbol                     = "STT"
 )
@@ -30,7 +32,7 @@ func mainnet(stageName string) params.Network {
 		DefaultFallbackURL:     fmt.Sprintf("https://%s.api.status.im/infura/ethereum/mainnet/", stageName),
 		DefaultFallbackURL2:    fmt.Sprintf("https://%s.api.status.im/grove/ethereum/mainnet/", stageName),
 		RPCURL:                 "https://mainnet.infura.io/v3/",
-		FallbackURL:            "https://eth-archival.rpc.grove.city/v1/",
+		FallbackURL:            "https://eth.rpc.grove.city/v1/",
 		BlockExplorerURL:       "https://etherscan.io/",
 		IconURL:                "network/Network=Ethereum",
 		ChainColor:             "#627EEA",
@@ -53,7 +55,7 @@ func sepolia(stageName string) params.Network {
 		DefaultFallbackURL:     fmt.Sprintf("https://%s.api.status.im/infura/ethereum/sepolia/", stageName),
 		DefaultFallbackURL2:    fmt.Sprintf("https://%s.api.status.im/grove/ethereum/sepolia/", stageName),
 		RPCURL:                 "https://sepolia.infura.io/v3/",
-		FallbackURL:            "https://sepolia-archival.rpc.grove.city/v1/",
+		FallbackURL:            "https://eth-sepolia-testnet.rpc.grove.city/v1/",
 		BlockExplorerURL:       "https://sepolia.etherscan.io/",
 		IconURL:                "network/Network=Ethereum",
 		ChainColor:             "#627EEA",
@@ -76,7 +78,7 @@ func optimism(stageName string) params.Network {
 		DefaultFallbackURL:     fmt.Sprintf("https://%s.api.status.im/infura/optimism/mainnet/", stageName),
 		DefaultFallbackURL2:    fmt.Sprintf("https://%s.api.status.im/grove/optimism/mainnet/", stageName),
 		RPCURL:                 "https://optimism-mainnet.infura.io/v3/",
-		FallbackURL:            "https://optimism-archival.rpc.grove.city/v1/",
+		FallbackURL:            "https://optimism.rpc.grove.city/v1/",
 		BlockExplorerURL:       "https://optimistic.etherscan.io",
 		IconURL:                "network/Network=Optimism",
 		ChainColor:             "#E90101",
@@ -99,7 +101,7 @@ func optimismSepolia(stageName string) params.Network {
 		DefaultFallbackURL:     fmt.Sprintf("https://%s.api.status.im/infura/optimism/sepolia/", stageName),
 		DefaultFallbackURL2:    fmt.Sprintf("https://%s.api.status.im/grove/optimism/sepolia/", stageName),
 		RPCURL:                 "https://optimism-sepolia.infura.io/v3/",
-		FallbackURL:            "https://optimism-sepolia-archival.rpc.grove.city/v1/",
+		FallbackURL:            "https://optimism-sepolia-testnet.rpc.grove.city/v1/",
 		BlockExplorerURL:       "https://sepolia-optimism.etherscan.io/",
 		IconURL:                "network/Network=Optimism",
 		ChainColor:             "#E90101",
@@ -111,6 +113,52 @@ func optimismSepolia(stageName string) params.Network {
 		Layer:                  2,
 		Enabled:                false,
 		RelatedChainID:         OptimismChainID,
+	}
+}
+
+func base(stageName string) params.Network {
+	return params.Network{
+		ChainID:                BaseChainID,
+		ChainName:              "Base",
+		DefaultRPCURL:          fmt.Sprintf("https://%s.api.status.im/nodefleet/base/mainnet/", stageName),
+		DefaultFallbackURL:     fmt.Sprintf("https://%s.api.status.im/infura/base/mainnet/", stageName),
+		DefaultFallbackURL2:    fmt.Sprintf("https://%s.api.status.im/grove/base/mainnet/", stageName),
+		RPCURL:                 "https://base-mainnet.infura.io/v3/",
+		FallbackURL:            "https://base.rpc.grove.city/v1/",
+		BlockExplorerURL:       "https://basescan.org",
+		IconURL:                "network/Network=Base",
+		ChainColor:             "#0052FF",
+		ShortName:              "base",
+		NativeCurrencyName:     "Ether",
+		NativeCurrencySymbol:   "ETH",
+		NativeCurrencyDecimals: 18,
+		IsTest:                 false,
+		Layer:                  2,
+		Enabled:                true,
+		RelatedChainID:         BaseSepoliaChainID,
+	}
+}
+
+func baseSepolia(stageName string) params.Network {
+	return params.Network{
+		ChainID:                BaseSepoliaChainID,
+		ChainName:              "Base",
+		DefaultRPCURL:          fmt.Sprintf("https://%s.api.status.im/nodefleet/base/sepolia/", stageName),
+		DefaultFallbackURL:     fmt.Sprintf("https://%s.api.status.im/infura/base/sepolia/", stageName),
+		DefaultFallbackURL2:    fmt.Sprintf("https://%s.api.status.im/grove/base/sepolia/", stageName),
+		RPCURL:                 "https://base-sepolia.infura.io/v3/",
+		FallbackURL:            "https://base-testnet.rpc.grove.city/v1/",
+		BlockExplorerURL:       "https://sepolia.basescan.org/",
+		IconURL:                "network/Network=Base",
+		ChainColor:             "#0052FF",
+		ShortName:              "base",
+		NativeCurrencyName:     "Ether",
+		NativeCurrencySymbol:   "ETH",
+		NativeCurrencyDecimals: 18,
+		IsTest:                 true,
+		Layer:                  2,
+		Enabled:                false,
+		RelatedChainID:         BaseChainID,
 	}
 }
 
@@ -145,7 +193,7 @@ func arbitrumSepolia(stageName string) params.Network {
 		DefaultFallbackURL:     fmt.Sprintf("https://%s.api.status.im/infura/arbitrum/sepolia/", stageName),
 		DefaultFallbackURL2:    fmt.Sprintf("https://%s.api.status.im/grove/arbitrum/sepolia/", stageName),
 		RPCURL:                 "https://arbitrum-sepolia.infura.io/v3/",
-		FallbackURL:            "https://arbitrum-sepolia-archival.rpc.grove.city/v1/",
+		FallbackURL:            "https://arbitrum-sepolia-testnet.rpc.grove.city/v1/",
 		BlockExplorerURL:       "https://sepolia-explorer.arbitrum.io/",
 		IconURL:                "network/Network=Arbitrum",
 		ChainColor:             "#51D0F0",
@@ -168,6 +216,8 @@ func defaultNetworks(stageName string) []params.Network {
 		optimismSepolia(stageName),
 		arbitrum(stageName),
 		arbitrumSepolia(stageName),
+		base(stageName),
+		baseSepolia(stageName),
 	}
 }
 

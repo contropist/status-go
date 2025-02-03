@@ -11,6 +11,8 @@ import requests
 import docker
 import docker.errors
 import os
+
+from tenacity import retry, stop_after_delay, wait_fixed
 from clients.services.wallet import WalletService
 from clients.services.wakuext import WakuextService
 from clients.services.accounts import AccountService
@@ -29,16 +31,24 @@ class StatusBackend(RpcClient, SignalClient):
     container = None
 
     def __init__(self, await_signals=[], privileged=False):
-
         if option.status_backend_url:
             url = option.status_backend_url
         else:
             self.docker_client = docker.from_env()
-            host_port = random.choice(option.status_backend_port_range)
-
-            self.container = self._start_container(host_port, privileged)
-            url = f"http://127.0.0.1:{host_port}"
-            option.status_backend_port_range.remove(host_port)
+            retries = 5
+            ports_tried = []
+            for _ in range(retries):
+                try:
+                    host_port = random.choice(option.status_backend_port_range)
+                    ports_tried.append(host_port)
+                    self.container = self._start_container(host_port, privileged)
+                    url = f"http://127.0.0.1:{host_port}"
+                    option.status_backend_port_range.remove(host_port)
+                    break
+                except Exception:
+                    continue
+            else:
+                raise RuntimeError(f"Failed to start container on ports: {ports_tried}")
 
         self.base_url = url
         self.api_url = f"{url}/statusgo"
@@ -99,7 +109,7 @@ class StatusBackend(RpcClient, SignalClient):
         network = self.docker_client.networks.get(f"{docker_project_name}_default")
         network.connect(container)
 
-        option.status_backend_containers.append(container.id)
+        option.status_backend_containers.append(self)
         return container
 
     def wait_for_healthy(self, timeout=10):
@@ -312,3 +322,17 @@ class StatusBackend(RpcClient, SignalClient):
 
     def find_public_key(self):
         self.public_key = self.node_login_event.get("event", {}).get("settings", {}).get("public-key")
+
+    @retry(stop=stop_after_delay(5), wait=wait_fixed(0.1), reraise=True)
+    def kill(self):
+        if not self.container:
+            return
+        logging.info(f"Killing container with id {self.container.short_id}")
+        self.container.kill()
+        try:
+            self.container.remove()
+        except Exception as e:
+            logging.warning(f"Failed to remove container {self.container.short_id}: {e}")
+        finally:
+            self.container = None
+            logging.info("Container stopped.")

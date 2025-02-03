@@ -8,18 +8,21 @@ from resources.enums import MessageContentType
 
 @pytest.mark.usefixtures("setup_two_nodes")
 @pytest.mark.reliability
-class TestOneToOneMessages(MessengerTestCase):
+class TestPrivateGroupMessages(MessengerTestCase):
 
-    def test_one_to_one_message_baseline(self, message_count=1):
+    def test_private_group_messages_baseline(self, message_count=1):
+        self.make_contacts()
+        self.private_group_id = self.join_private_group()
+
         sent_messages = []
         for i in range(message_count):
             message_text = f"test_message_{i+1}_{uuid4()}"
-            response = self.sender.wakuext_service.send_message(self.receiver.public_key, message_text)
+            response = self.sender.wakuext_service.send_group_chat_message(self.private_group_id, message_text)
             expected_message = self.get_message_by_content_type(response, content_type=MessageContentType.TEXT_PLAIN.value)[0]
             sent_messages.append(expected_message)
             sleep(0.01)
 
-        for i, expected_message in enumerate(sent_messages):
+        for _, expected_message in enumerate(sent_messages):
             messages_new_event = self.receiver.find_signal_containing_pattern(
                 SignalType.MESSAGES_NEW.value,
                 event_pattern=expected_message.get("id"),
@@ -31,25 +34,28 @@ class TestOneToOneMessages(MessengerTestCase):
                 expected_message=expected_message,
             )
 
-    def test_multiple_one_to_one_messages(self):
-        self.test_one_to_one_message_baseline(message_count=50)
+    def test_multiple_group_chat_messages(self):
+        self.test_private_group_messages_baseline(message_count=50)
 
-    def test_one_to_one_message_with_latency(self):
+    def test_multiple_group_chat_messages_with_latency(self):
         with self.add_latency(self.receiver):
-            self.test_one_to_one_message_baseline(message_count=50)
+            self.test_private_group_messages_baseline(message_count=50)
 
-    def test_one_to_one_message_with_packet_loss(self):
+    def test_multiple_group_chat_messages_with_packet_loss(self):
         with self.add_packet_loss(self.receiver):
-            self.test_one_to_one_message_baseline(message_count=50)
+            self.test_private_group_messages_baseline(message_count=50)
 
-    def test_one_to_one_message_with_low_bandwidth(self):
+    def test_multiple_group_chat_messages_with_low_bandwidth(self):
         with self.add_low_bandwith(self.receiver):
-            self.test_one_to_one_message_baseline(message_count=50)
+            self.test_private_group_messages_baseline(message_count=50)
 
-    def test_one_to_one_message_with_node_pause_30_seconds(self):
+    def test_private_group_messages_with_node_pause_30_seconds(self):
+        self.make_contacts()
+        self.private_group_id = self.join_private_group()
+
         with self.node_pause(self.receiver):
             message_text = f"test_message_{uuid4()}"
-            self.sender.wakuext_service.send_message(self.receiver.public_key, message_text)
+            self.sender.wakuext_service.send_group_chat_message(self.private_group_id, message_text)
             sleep(30)
         self.receiver.find_signal_containing_pattern(SignalType.MESSAGES_NEW.value, event_pattern=message_text)
         self.sender.wait_for_signal(SignalType.MESSAGE_DELIVERED.value)

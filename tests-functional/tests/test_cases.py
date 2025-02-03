@@ -4,6 +4,7 @@ import logging
 import threading
 import time
 from collections import namedtuple
+from uuid import uuid4
 
 import pytest
 
@@ -24,6 +25,7 @@ class StatusDTestCase:
 
 class StatusBackendTestCase:
 
+    reuse_container = True  # Skip close_status_backend_containers cleanup
     await_signals = [SignalType.NODE_LOGIN.value]
 
     network_id = 31337
@@ -35,6 +37,10 @@ class StatusBackendTestCase:
         self.rpc_client.init_status_backend()
         self.rpc_client.restore_account_and_login()
         self.rpc_client.wait_for_login()
+
+    def teardown_class(self):
+        for container in option.status_backend_containers:
+            container.kill()
 
 
 class WalletTestCase(StatusBackendTestCase):
@@ -172,9 +178,9 @@ class NetworkConditionTestCase:
             node.container_exec("tc qdisc del dev eth0 root netem")
 
     @contextmanager
-    def add_low_bandwith(self, node, rate="1mbit", burst="32kbit"):
+    def add_low_bandwith(self, node, rate="1mbit", burst="32kbit", limit="12500"):
         logging.info("Entering context manager: add_low_bandwith")
-        node.container_exec(f"apk add iproute2 && tc qdisc add dev eth0 root tbf rate {rate} burst {burst}")
+        node.container_exec(f"apk add iproute2 && tc qdisc add dev eth0 root tbf rate {rate} burst {burst} limit {limit}")
         try:
             yield
         finally:
@@ -200,13 +206,13 @@ class MessengerTestCase(NetworkConditionTestCase):
         SignalType.NODE_LOGIN.value,
     ]
 
-    @pytest.fixture(scope="class", autouse=False)
+    @pytest.fixture(scope="function", autouse=False)
     def setup_two_nodes(self, request):
         request.cls.sender = self.sender = self.initialize_backend(await_signals=self.await_signals)
         request.cls.receiver = self.receiver = self.initialize_backend(await_signals=self.await_signals)
 
     def initialize_backend(self, await_signals):
-        backend = StatusBackend(await_signals=await_signals)
+        backend = StatusBackend(await_signals=await_signals, privileged=True)
         backend.init_status_backend()
         backend.create_account_and_login()
         backend.find_public_key()
@@ -264,3 +270,13 @@ class MessengerTestCase(NetworkConditionTestCase):
             return matched_messages
         else:
             raise ValueError(f"Failed to find a message with contentType '{content_type}' in response")
+
+    def join_private_group(self):
+        private_group_name = f"private_group_{uuid4()}"
+        response = self.sender.wakuext_service.create_group_chat_with_members([self.receiver.public_key], private_group_name)
+        expected_group_creation_msg = f"@{self.sender.public_key} created the group {private_group_name}"
+        expected_message = self.get_message_by_content_type(
+            response, content_type=MessageContentType.SYSTEM_MESSAGE_CONTENT_PRIVATE_GROUP.value, message_pattern=expected_group_creation_msg
+        )[0]
+        self.receiver.find_signal_containing_pattern(SignalType.MESSAGES_NEW.value, event_pattern=expected_message.get("id"), timeout=60)
+        return response.get("result", {}).get("chats", [])[0].get("id")

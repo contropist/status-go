@@ -219,10 +219,10 @@ class MessengerTestCase(NetworkConditionTestCase):
         request.cls.sender = self.sender = self.initialize_backend(self.await_signals, False)
         request.cls.receiver = self.receiver = self.initialize_backend(self.await_signals, False)
 
-    def initialize_backend(self, await_signals, privileged=True):
+    def initialize_backend(self, await_signals, privileged=True, **kwargs):
         backend = StatusBackend(await_signals, privileged)
         backend.init_status_backend()
-        backend.create_account_and_login()
+        backend.create_account_and_login(**kwargs)
         backend.find_public_key()
         backend.wakuext_service.start_messenger()
         return backend

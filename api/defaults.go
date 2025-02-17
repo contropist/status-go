@@ -228,11 +228,23 @@ func buildWalletConfig(request *requests.WalletSecretsConfig, statusProxyEnabled
 	if request.StatusProxyMarketPassword != "" {
 		walletConfig.StatusProxyMarketPassword = request.StatusProxyMarketPassword
 	}
+
+	// FIXME: remove when EthRpcProxy* is integrated
 	if request.StatusProxyBlockchainUser != "" {
 		walletConfig.StatusProxyBlockchainUser = request.StatusProxyBlockchainUser
 	}
 	if request.StatusProxyBlockchainPassword != "" {
 		walletConfig.StatusProxyBlockchainPassword = request.StatusProxyBlockchainPassword
+	}
+
+	if request.EthRpcProxyUrl != "" {
+		walletConfig.EthRpcProxyUrl = request.EthRpcProxyUrl
+	}
+	if request.EthRpcProxyUser != "" {
+		walletConfig.EthRpcProxyUser = request.EthRpcProxyUser
+	}
+	if request.EthRpcProxyPassword != "" {
+		walletConfig.EthRpcProxyPassword = request.EthRpcProxyPassword
 	}
 
 	walletConfig.StatusProxyEnabled = statusProxyEnabled
@@ -252,6 +264,22 @@ func overrideApiConfigProd(nodeConfig *params.NodeConfig, config *requests.APICo
 	nodeConfig.WSEnabled = config.WSEnabled
 	nodeConfig.WSHost = config.WSHost
 	nodeConfig.WSPort = config.WSPort
+}
+
+// getMainnetRPCURL retuevrns URL of the first provider with TokenAuth from mainnet network
+func getMainnetRPCURL(networks []params.Network) string {
+	for _, network := range networks {
+		if network.ChainID != MainnetChainID {
+			continue
+		}
+		for _, provider := range network.RpcProviders {
+			if provider.AuthType == params.TokenAuth && provider.Enabled {
+				return provider.GetFullURL()
+			}
+		}
+		break
+	}
+	return ""
 }
 
 func DefaultNodeConfig(installationID string, request *requests.CreateAccount, opts ...params.Option) (*params.NodeConfig, error) {
@@ -344,13 +372,13 @@ func DefaultNodeConfig(installationID string, request *requests.CreateAccount, o
 	if request.VerifyTransactionURL != nil {
 		nodeConfig.ShhextConfig.VerifyTransactionURL = *request.VerifyTransactionURL
 	} else {
-		nodeConfig.ShhextConfig.VerifyTransactionURL = mainnet(request.WalletSecretsConfig.StatusProxyStageName).FallbackURL
+		nodeConfig.ShhextConfig.VerifyTransactionURL = getMainnetRPCURL(nodeConfig.Networks)
 	}
 
 	if request.VerifyENSURL != nil {
 		nodeConfig.ShhextConfig.VerifyENSURL = *request.VerifyENSURL
 	} else {
-		nodeConfig.ShhextConfig.VerifyENSURL = mainnet(request.WalletSecretsConfig.StatusProxyStageName).FallbackURL
+		nodeConfig.ShhextConfig.VerifyENSURL = getMainnetRPCURL(nodeConfig.Networks)
 	}
 
 	if request.VerifyTransactionChainID != nil {

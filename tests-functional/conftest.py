@@ -81,5 +81,7 @@ def close_status_backend_containers(request):
     yield
     if hasattr(request.node.instance, "reuse_container"):
         return
-    for container in option.status_backend_containers:
-        container.kill()  # type: ignore
+    for status_backend in option.status_backend_containers:
+        status_backend.container.stop(timeout=10)  # pyright: ignore[reportAttributeAccessIssue]
+        option.status_backend_containers.remove(status_backend)
+        status_backend.container.remove()  # pyright: ignore[reportAttributeAccessIssue]

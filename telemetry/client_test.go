@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/waku-org/go-waku/waku/v2/api/publish"
 	v2protocol "github.com/waku-org/go-waku/waku/v2/protocol"
 	"github.com/waku-org/go-waku/waku/v2/protocol/pb"
 
@@ -24,8 +25,9 @@ import (
 	"github.com/status-im/status-go/protocol/transport"
 	"github.com/status-im/status-go/protocol/tt"
 	v1protocol "github.com/status-im/status-go/protocol/v1"
+	wakutypes "github.com/status-im/status-go/waku/types"
 	"github.com/status-im/status-go/wakuv2"
-	"github.com/waku-org/go-waku/waku/v2/api/publish"
+	"github.com/status-im/status-go/wakuv2/common"
 )
 
 var (
@@ -116,6 +118,18 @@ func withMockServer(t *testing.T, expectedType TelemetryType, expectedCondition 
 	wg.Wait()
 }
 
+func sendEnvelope(ctx context.Context, client *Client) {
+	client.PushSentEnvelope(ctx, wakuv2.SentEnvelope{
+		Envelope: v2protocol.NewEnvelope(&pb.WakuMessage{
+			Payload:      []byte{1, 2, 3, 4, 5},
+			ContentTopic: testContentTopic,
+			Version:      proto.Uint32(0),
+			Timestamp:    proto.Int64(time.Now().Unix()),
+		}, 0, ""),
+		PublishMethod: publish.LightPush,
+	})
+}
+
 func TestClient_ProcessReceivedMessages(t *testing.T) {
 	withMockServer(t, ReceivedMessagesMetric, nil, func(ctx context.Context, t *testing.T, client *Client, wg *sync.WaitGroup) {
 		// Create a telemetry request to send
@@ -123,9 +137,9 @@ func TestClient_ProcessReceivedMessages(t *testing.T) {
 			Filter: transport.Filter{
 				ChatID:       "testChat",
 				PubsubTopic:  "testTopic",
-				ContentTopic: types.StringToTopic(testContentTopic),
+				ContentTopic: wakutypes.StringToTopic(testContentTopic),
 			},
-			SSHMessage: &types.Message{
+			SSHMessage: &wakutypes.Message{
 				Hash:      []byte("hash"),
 				Timestamp: uint32(time.Now().Unix()),
 			},
@@ -145,38 +159,11 @@ func TestClient_ProcessReceivedMessages(t *testing.T) {
 	})
 }
 
-func TestClient_ProcessReceivedEnvelope(t *testing.T) {
-	withMockServer(t, ReceivedEnvelopeMetric, nil, func(ctx context.Context, t *testing.T, client *Client, wg *sync.WaitGroup) {
-		// Create a telemetry request to send
-		envelope := v2protocol.NewEnvelope(&pb.WakuMessage{
-			Payload:      []byte{1, 2, 3, 4, 5},
-			ContentTopic: testContentTopic,
-			Version:      proto.Uint32(0),
-			Timestamp:    proto.Int64(time.Now().Unix()),
-		}, 0, "")
-
-		// Send the telemetry request
-		client.Start(ctx)
-		client.PushReceivedEnvelope(ctx, envelope)
-	})
-}
-
 func TestClient_ProcessSentEnvelope(t *testing.T) {
 	withMockServer(t, SentEnvelopeMetric, nil, func(ctx context.Context, t *testing.T, client *Client, wg *sync.WaitGroup) {
-		// Create a telemetry request to send
-		sentEnvelope := wakuv2.SentEnvelope{
-			Envelope: v2protocol.NewEnvelope(&pb.WakuMessage{
-				Payload:      []byte{1, 2, 3, 4, 5},
-				ContentTopic: testContentTopic,
-				Version:      proto.Uint32(0),
-				Timestamp:    proto.Int64(time.Now().Unix()),
-			}, 0, ""),
-			PublishMethod: publish.LightPush,
-		}
-
 		// Send the telemetry request
 		client.Start(ctx)
-		client.PushSentEnvelope(ctx, sentEnvelope)
+		sendEnvelope(ctx, client)
 	})
 }
 
@@ -283,24 +270,14 @@ func TestRetryCache(t *testing.T) {
 	client.Start(ctx)
 
 	for i := 0; i < 3; i++ {
-		client.PushReceivedEnvelope(ctx, v2protocol.NewEnvelope(&pb.WakuMessage{
-			Payload:      []byte{1, 2, 3, 4, 5},
-			ContentTopic: testContentTopic,
-			Version:      proto.Uint32(0),
-			Timestamp:    proto.Int64(time.Now().Unix()),
-		}, 0, ""))
+		sendEnvelope(ctx, client)
 	}
 
 	time.Sleep(110 * time.Millisecond)
 
 	require.Equal(t, 3, len(client.telemetryRetryCache))
 
-	client.PushReceivedEnvelope(ctx, v2protocol.NewEnvelope(&pb.WakuMessage{
-		Payload:      []byte{1, 2, 3, 4, 5},
-		ContentTopic: testContentTopic,
-		Version:      proto.Uint32(0),
-		Timestamp:    proto.Int64(time.Now().Unix()),
-	}, 0, ""))
+	sendEnvelope(ctx, client)
 
 	wg.Wait()
 
@@ -313,32 +290,37 @@ func TestRetryCacheCleanup(t *testing.T) {
 	ctx := context.Background()
 
 	client := createClient(t, "")
-	client.Start(ctx)
 
 	for i := 0; i < 6000; i++ {
-		client.PushReceivedEnvelope(ctx, v2protocol.NewEnvelope(&pb.WakuMessage{
-			Payload:      []byte{1, 2, 3, 4, 5},
-			ContentTopic: testContentTopic,
-			Version:      proto.Uint32(0),
-			Timestamp:    proto.Int64(time.Now().Unix()),
-		}, 0, ""))
+		go sendEnvelope(ctx, client)
+		telemetryRequest := <-client.telemetryCh
+		client.telemetryCache = append(client.telemetryCache, telemetryRequest)
 	}
 
-	time.Sleep(110 * time.Millisecond)
+	err := client.pushTelemetryRequest(client.telemetryCache)
+	// For this test case an error when pushing to the server is fine
+	require.Error(t, err)
 
+	client.telemetryCache = nil
 	require.Equal(t, 6000, len(client.telemetryRetryCache))
 
-	client.PushReceivedEnvelope(ctx, v2protocol.NewEnvelope(&pb.WakuMessage{
-		Payload:      []byte{1, 2, 3, 4, 5},
-		ContentTopic: testContentTopic,
-		Version:      proto.Uint32(0),
-		Timestamp:    proto.Int64(time.Now().Unix()),
-	}, 0, ""))
+	go sendEnvelope(ctx, client)
+	telemetryRequest := <-client.telemetryCh
+	client.telemetryCache = append(client.telemetryCache, telemetryRequest)
 
-	time.Sleep(210 * time.Millisecond)
+	err = client.pushTelemetryRequest(client.telemetryCache)
+	require.Error(t, err)
+
+	telemetryRequests := make([]TelemetryRequest, len(client.telemetryCache))
+	copy(telemetryRequests, client.telemetryCache)
+	client.telemetryCache = nil
+
+	err = client.pushTelemetryRequest(telemetryRequests)
+	require.Error(t, err)
 
 	require.Equal(t, 5001, len(client.telemetryRetryCache))
 }
+
 func setDefaultConfig(config *wakuv2.Config, lightMode bool) {
 	config.ClusterID = 16
 
@@ -357,7 +339,7 @@ func setDefaultConfig(config *wakuv2.Config, lightMode bool) {
 var testStoreENRBootstrap = "enrtree://AI4W5N5IFEUIHF5LESUAOSMV6TKWF2MB6GU2YK7PU4TYUGUNOCEPW@store.staging.shards.nodes.status.im"
 
 func TestPeerCount(t *testing.T) {
-	t.Skip("flaky test")
+	// t.Skip("flaky test")
 
 	expectedCondition := func(received []TelemetryRequest) (shouldSucceed bool, shouldFail bool) {
 		found := slices.ContainsFunc(received, func(req TelemetryRequest) bool {
@@ -371,6 +353,9 @@ func TestPeerCount(t *testing.T) {
 		setDefaultConfig(config, false)
 		config.DiscV5BootstrapNodes = []string{testStoreENRBootstrap}
 		config.DiscoveryLimit = 20
+		config.TelemetryServerURL = client.serverURL
+		config.TelemetrySendPeriodMs = 1500
+		config.TelemetryPeerCountSendPeriod = 1500
 		w, err := wakuv2.New(nil, "shards.staging", config, nil, nil, nil, nil, nil)
 		require.NoError(t, err)
 
@@ -405,16 +390,225 @@ func TestPeerId(t *testing.T) {
 		require.True(t, ok)
 		return ok, false
 	}
-	withMockServer(t, ReceivedEnvelopeMetric, expectedCondition, func(ctx context.Context, t *testing.T, client *Client, wg *sync.WaitGroup) {
+	withMockServer(t, SentEnvelopeMetric, expectedCondition, func(ctx context.Context, t *testing.T, client *Client, wg *sync.WaitGroup) {
+		// Send the telemetry request
 		client.Start(ctx)
-
-		client.PushReceivedEnvelope(ctx, v2protocol.NewEnvelope(&pb.WakuMessage{
-			Payload:      []byte{1, 2, 3, 4, 5},
-			ContentTopic: testContentTopic,
-			Version:      proto.Uint32(0),
-			Timestamp:    proto.Int64(time.Now().Unix()),
-		}, 0, ""))
+		sendEnvelope(ctx, client)
 
 	})
 
+}
+
+func TestPeerCountByShard(t *testing.T) {
+	expectedCondition := func(received []TelemetryRequest) (shouldSucceed bool, shouldFail bool) {
+		found := slices.ContainsFunc(received, func(req TelemetryRequest) bool {
+			return req.TelemetryType == PeerCountByShardMetric
+		})
+		return found, false
+	}
+	withMockServer(t, PeerCountByShardMetric, expectedCondition, func(ctx context.Context, t *testing.T, client *Client, wg *sync.WaitGroup) {
+		config := &wakuv2.Config{}
+		setDefaultConfig(config, false)
+		config.DiscV5BootstrapNodes = []string{testStoreENRBootstrap}
+		config.DiscoveryLimit = 20
+		config.TelemetryServerURL = client.serverURL
+		config.TelemetryPeerCountSendPeriod = 1500
+		config.TelemetrySendPeriodMs = 1500
+		w, err := wakuv2.New(nil, "shards.staging", config, nil, nil, nil, nil, nil)
+		require.NoError(t, err)
+
+		w.SetStatusTelemetryClient(client)
+		client.Start(ctx)
+
+		require.NoError(t, w.Start())
+
+		err = tt.RetryWithBackOff(func() error {
+			if len(w.Peers()) == 0 {
+				return errors.New("no peers discovered")
+			}
+			return nil
+		})
+
+		require.NoError(t, err)
+
+		require.NotEqual(t, 0, len(w.Peers()))
+	})
+}
+
+func TestPeerCountByOrigin(t *testing.T) {
+	expectedCondition := func(received []TelemetryRequest) (shouldSucceed bool, shouldFail bool) {
+		found := slices.ContainsFunc(received, func(req TelemetryRequest) bool {
+			return req.TelemetryType == PeerCountByOriginMetric
+		})
+		return found, false
+	}
+	withMockServer(t, PeerCountByOriginMetric, expectedCondition, func(ctx context.Context, t *testing.T, client *Client, wg *sync.WaitGroup) {
+		config := &wakuv2.Config{}
+		setDefaultConfig(config, false)
+		config.DiscV5BootstrapNodes = []string{testStoreENRBootstrap}
+		config.DiscoveryLimit = 20
+		config.TelemetryServerURL = client.serverURL
+		config.TelemetryPeerCountSendPeriod = 1500
+		config.TelemetrySendPeriodMs = 1500
+		w, err := wakuv2.New(nil, "shards.staging", config, nil, nil, nil, nil, nil)
+		require.NoError(t, err)
+
+		w.SetStatusTelemetryClient(client)
+		client.Start(ctx)
+
+		require.NoError(t, w.Start())
+
+		err = tt.RetryWithBackOff(func() error {
+			if len(w.Peers()) == 0 {
+				return errors.New("no peers discovered")
+			}
+			return nil
+		})
+
+		require.NoError(t, err)
+
+		require.NotEqual(t, 0, len(w.Peers()))
+	})
+}
+
+type testCase struct {
+	name           string
+	input          interface{}
+	expectedType   TelemetryType
+	expectedFields map[string]interface{}
+}
+
+func runTestCase(t *testing.T, tc testCase) {
+	ctx := context.Background()
+	client := createClient(t, "")
+
+	go client.processAndPushTelemetry(ctx, tc.input)
+
+	telemetryRequest := <-client.telemetryCh
+
+	require.Equal(t, tc.expectedType, telemetryRequest.TelemetryType, "Unexpected telemetry type")
+
+	var telemetryData map[string]interface{}
+	err := json.Unmarshal(*telemetryRequest.TelemetryData, &telemetryData)
+	require.NoError(t, err, "Failed to unmarshal telemetry data")
+
+	for key, value := range tc.expectedFields {
+		require.Equal(t, value, telemetryData[key], "Unexpected value for %s", key)
+	}
+
+	require.Contains(t, telemetryData, "nodeName", "Missing nodeName in telemetry data")
+	require.Contains(t, telemetryData, "peerId", "Missing peerId in telemetry data")
+	require.Contains(t, telemetryData, "statusVersion", "Missing statusVersion in telemetry data")
+	require.Contains(t, telemetryData, "deviceType", "Missing deviceType in telemetry data")
+	require.Contains(t, telemetryData, "timestamp", "Missing timestamp in telemetry data")
+
+	// Simulate pushing the telemetry request
+	client.telemetryCache = append(client.telemetryCache, telemetryRequest)
+
+	err = client.pushTelemetryRequest(client.telemetryCache)
+	// For this test case, we expect an error when pushing to the server
+	require.Error(t, err)
+
+	// Verify that the request is now in the retry cache
+	require.Equal(t, 1, len(client.telemetryRetryCache), "Expected one item in telemetry retry cache")
+}
+
+func TestProcessMessageDeliveryConfirmed(t *testing.T) {
+	tc := testCase{
+		name: "MessageDeliveryConfirmed",
+		input: MessageDeliveryConfirmed{
+			MessageHash: "0x1234567890abcdef",
+		},
+		expectedType: MessageDeliveryConfirmedMetric,
+		expectedFields: map[string]interface{}{
+			"messageHash": "0x1234567890abcdef",
+		},
+	}
+	runTestCase(t, tc)
+}
+
+func TestProcessMissedRelevantMessage(t *testing.T) {
+	now := time.Now()
+	message := common.NewReceivedMessage(
+		v2protocol.NewEnvelope(
+			&pb.WakuMessage{
+				Payload:      []byte{1, 2, 3, 4, 5},
+				ContentTopic: testContentTopic,
+				Version:      proto.Uint32(0),
+				Timestamp:    proto.Int64(now.Unix()),
+			}, 0, ""),
+		common.MissingMessageType,
+	)
+	tc := testCase{
+		name: "MissedRelevantMessage",
+		input: MissedRelevantMessage{
+			ReceivedMessage: message,
+		},
+		expectedType: MissedRelevantMessageMetric,
+		expectedFields: map[string]interface{}{
+			"messageHash":  message.Envelope.Hash().String(),
+			"pubsubTopic":  "",
+			"contentTopic": "0x12345679",
+		},
+	}
+	runTestCase(t, tc)
+}
+
+func TestProcessMissedMessage(t *testing.T) {
+	now := time.Now()
+	message := common.NewReceivedMessage(
+		v2protocol.NewEnvelope(
+			&pb.WakuMessage{
+				Payload:      []byte{1, 2, 3, 4, 5},
+				ContentTopic: testContentTopic,
+				Version:      proto.Uint32(0),
+				Timestamp:    proto.Int64(now.Unix()),
+			}, 0, ""),
+		common.MissingMessageType,
+	)
+	tc := testCase{
+		name: "MissedMessage",
+		input: MissedMessage{
+			Envelope: message.Envelope,
+		},
+		expectedType: MissedMessageMetric,
+		expectedFields: map[string]interface{}{
+			"messageHash":  message.Envelope.Hash().String(),
+			"pubsubTopic":  "",
+			"contentTopic": message.Envelope.Message().ContentTopic,
+		},
+	}
+	runTestCase(t, tc)
+}
+
+func TestProcessDialFailure(t *testing.T) {
+	tc := testCase{
+		name: "DialFailure",
+		input: DialFailure{
+			ErrorType: common.ErrorUnknown,
+			ErrorMsg:  "test error message",
+			Protocols: "test-protocols",
+		},
+		expectedType: DialFailureMetric,
+		expectedFields: map[string]interface{}{
+			"errorType": float64(common.ErrorUnknown),
+			"errorMsg":  "test error message",
+			"protocols": "test-protocols",
+		},
+	}
+	runTestCase(t, tc)
+}
+
+func TestProcessSentMessageTotal(t *testing.T) {
+	tc := testCase{
+		name: "SentMessageTotal",
+		input: SentMessageTotal{
+			Size: uint32(1234),
+		},
+		expectedType: SentMessageTotalMetric,
+		expectedFields: map[string]interface{}{
+			"size": float64(1234),
+		},
+	}
+	runTestCase(t, tc)
 }

@@ -14,11 +14,12 @@ import (
 
 	"github.com/ethereum/go-ethereum/rlp"
 
-	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
 	"github.com/status-im/status-go/eth-node/crypto"
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/postgres"
-	waku "github.com/status-im/status-go/waku/common"
+	wakutypes "github.com/status-im/status-go/waku/types"
+	"github.com/status-im/status-go/wakuv1"
+	wakuv1common "github.com/status-im/status-go/wakuv1/common"
 )
 
 func TestMailServerPostgresDBSuite(t *testing.T) {
@@ -48,9 +49,9 @@ func (s *MailServerPostgresDBSuite) TestPostgresDB_BuildIteratorWithBloomFilter(
 	s.NoError(err)
 
 	iter, err := db.BuildIterator(CursorQuery{
-		start: NewDBKey(uint32(time.Now().Add(-time.Hour).Unix()), types.BytesToTopic(topic), types.Hash{}).Bytes(),
-		end:   NewDBKey(uint32(time.Now().Add(time.Second).Unix()), types.BytesToTopic(topic), types.Hash{}).Bytes(),
-		bloom: types.TopicToBloom(types.BytesToTopic(topic)),
+		start: NewDBKey(uint32(time.Now().Add(-time.Hour).Unix()), wakutypes.BytesToTopic(topic), types.Hash{}).Bytes(),
+		end:   NewDBKey(uint32(time.Now().Add(time.Second).Unix()), wakutypes.BytesToTopic(topic), types.Hash{}).Bytes(),
+		bloom: wakutypes.TopicToBloom(wakutypes.BytesToTopic(topic)),
 		limit: 10,
 	})
 	s.NoError(err)
@@ -59,10 +60,10 @@ func (s *MailServerPostgresDBSuite) TestPostgresDB_BuildIteratorWithBloomFilter(
 	rawValue, err := iter.GetEnvelopeByBloomFilter(nil)
 	s.NoError(err)
 	s.NotEmpty(rawValue)
-	var receivedEnvelope waku.Envelope
+	var receivedEnvelope wakuv1common.Envelope
 	err = rlp.DecodeBytes(rawValue, &receivedEnvelope)
 	s.NoError(err)
-	s.EqualValues(waku.BytesToTopic(topic), receivedEnvelope.Topic)
+	s.EqualValues(wakuv1common.BytesToTopic(topic), receivedEnvelope.Topic)
 
 	err = iter.Release()
 	s.NoError(err)
@@ -82,8 +83,8 @@ func (s *MailServerPostgresDBSuite) TestPostgresDB_BuildIteratorWithTopic() {
 	s.NoError(err)
 
 	iter, err := db.BuildIterator(CursorQuery{
-		start:  NewDBKey(uint32(time.Now().Add(-time.Hour).Unix()), types.BytesToTopic(topic), types.Hash{}).Bytes(),
-		end:    NewDBKey(uint32(time.Now().Add(time.Second).Unix()), types.BytesToTopic(topic), types.Hash{}).Bytes(),
+		start:  NewDBKey(uint32(time.Now().Add(-time.Hour).Unix()), wakutypes.BytesToTopic(topic), types.Hash{}).Bytes(),
+		end:    NewDBKey(uint32(time.Now().Add(time.Second).Unix()), wakutypes.BytesToTopic(topic), types.Hash{}).Bytes(),
 		topics: [][]byte{topic},
 		limit:  10,
 	})
@@ -93,30 +94,30 @@ func (s *MailServerPostgresDBSuite) TestPostgresDB_BuildIteratorWithTopic() {
 	rawValue, err := iter.GetEnvelopeByBloomFilter(nil)
 	s.NoError(err)
 	s.NotEmpty(rawValue)
-	var receivedEnvelope waku.Envelope
+	var receivedEnvelope wakuv1common.Envelope
 	err = rlp.DecodeBytes(rawValue, &receivedEnvelope)
 	s.NoError(err)
-	s.EqualValues(waku.BytesToTopic(topic), receivedEnvelope.Topic)
+	s.EqualValues(wakuv1common.BytesToTopic(topic), receivedEnvelope.Topic)
 
 	err = iter.Release()
 	s.NoError(err)
 	s.NoError(iter.Error())
 }
 
-func newTestEnvelope(topic []byte) (types.Envelope, error) {
+func newTestEnvelope(topic []byte) (wakutypes.Envelope, error) {
 	privateKey, err := crypto.GenerateKey()
 	if err != nil {
 		return nil, err
 	}
-	params := waku.MessageParams{
+	params := wakuv1common.MessageParams{
 		TTL:      10,
 		PoW:      2.0,
 		Payload:  []byte("hello world"),
 		WorkTime: 1,
-		Topic:    waku.BytesToTopic(topic),
+		Topic:    wakuv1common.BytesToTopic(topic),
 		Dst:      &privateKey.PublicKey,
 	}
-	message, err := waku.NewSentMessage(&params)
+	message, err := wakuv1common.NewSentMessage(&params)
 	if err != nil {
 		return nil, err
 	}
@@ -125,5 +126,5 @@ func newTestEnvelope(topic []byte) (types.Envelope, error) {
 	if err != nil {
 		return nil, err
 	}
-	return gethbridge.NewWakuEnvelope(envelope), nil
+	return wakuv1.NewWakuEnvelope(envelope), nil
 }

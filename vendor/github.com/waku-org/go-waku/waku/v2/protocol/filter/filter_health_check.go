@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/waku-org/go-waku/waku/v2/utils"
 	"go.uber.org/zap"
 )
 
@@ -19,10 +20,11 @@ func (wf *WakuFilterLightNode) PingPeers() {
 }
 
 func (wf *WakuFilterLightNode) PingPeer(peer peer.ID) {
+	defer utils.LogOnPanic()
 	ctxWithTimeout, cancel := context.WithTimeout(wf.CommonService.Context(), PingTimeout)
 	defer cancel()
 	err := wf.Ping(ctxWithTimeout, peer)
-	if err != nil {
+	if err != nil && wf.onlineChecker.IsOnline() {
 		wf.log.Warn("Filter ping failed towards peer", zap.Stringer("peer", peer), zap.Error(err))
 		//quickly retry ping again before marking subscription as failure
 		//Note that PingTimeout is a fraction of PingInterval so this shouldn't cause parallel pings being sent.
@@ -41,6 +43,7 @@ func (wf *WakuFilterLightNode) PingPeer(peer peer.ID) {
 }
 
 func (wf *WakuFilterLightNode) FilterHealthCheckLoop() {
+	defer utils.LogOnPanic()
 	defer wf.WaitGroup().Done()
 	ticker := time.NewTicker(wf.peerPingInterval)
 	defer ticker.Stop()

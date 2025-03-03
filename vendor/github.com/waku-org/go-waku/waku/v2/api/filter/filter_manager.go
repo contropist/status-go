@@ -13,6 +13,7 @@ import (
 	"github.com/waku-org/go-waku/waku/v2/onlinechecker"
 	"github.com/waku-org/go-waku/waku/v2/protocol"
 	"github.com/waku-org/go-waku/waku/v2/protocol/filter"
+	"github.com/waku-org/go-waku/waku/v2/utils"
 )
 
 // Methods on FilterManager just aggregate filters from application and subscribe to them
@@ -25,13 +26,14 @@ import (
 // filterSubscriptions is the map of filter subscription IDs to subscriptions
 
 const filterSubBatchSize = 90
+const initNetworkConnType = 255
 
 type appFilterMap map[string]filterConfig
 
 type FilterManager struct {
 	sync.Mutex
 	ctx                    context.Context
-	opts                   []SubscribeOptions
+	params                 *subscribeParameters
 	minPeersPerFilter      int
 	onlineChecker          *onlinechecker.DefaultOnlineChecker
 	filterSubscriptions    map[string]SubDetails // map of aggregated filters to apiSub details
@@ -42,6 +44,7 @@ type FilterManager struct {
 	filterConfigs          appFilterMap // map of application filterID to {aggregatedFilterID, application ContentFilter}
 	waitingToSubQueue      chan filterConfig
 	envProcessor           EnevelopeProcessor
+	networkConnType        byte
 }
 
 type SubDetails struct {
@@ -60,11 +63,11 @@ type EnevelopeProcessor interface {
 	OnNewEnvelope(env *protocol.Envelope) error
 }
 
-func NewFilterManager(ctx context.Context, logger *zap.Logger, minPeersPerFilter int, envProcessor EnevelopeProcessor, node *filter.WakuFilterLightNode, opts ...SubscribeOptions) *FilterManager {
+func NewFilterManager(ctx context.Context, logger *zap.Logger, minPeersPerFilter int,
+	envProcessor EnevelopeProcessor, node *filter.WakuFilterLightNode, opts ...SubscribeOptions) *FilterManager {
 	// This fn is being mocked in test
 	mgr := new(FilterManager)
 	mgr.ctx = ctx
-	mgr.opts = opts
 	mgr.logger = logger
 	mgr.minPeersPerFilter = minPeersPerFilter
 	mgr.envProcessor = envProcessor
@@ -72,15 +75,24 @@ func NewFilterManager(ctx context.Context, logger *zap.Logger, minPeersPerFilter
 	mgr.node = node
 	mgr.onlineChecker = onlinechecker.NewDefaultOnlineChecker(false).(*onlinechecker.DefaultOnlineChecker)
 	mgr.node.SetOnlineChecker(mgr.onlineChecker)
-	mgr.filterSubBatchDuration = 5 * time.Second
 	mgr.incompleteFilterBatch = make(map[string]filterConfig)
 	mgr.filterConfigs = make(appFilterMap)
 	mgr.waitingToSubQueue = make(chan filterConfig, 100)
+	mgr.networkConnType = initNetworkConnType
+
+	//parsing the subscribe params only to read the batchInterval passed.
+	mgr.params = new(subscribeParameters)
+	opts = append(defaultOptions(), opts...)
+	for _, opt := range opts {
+		opt(mgr.params)
+	}
+	mgr.filterSubBatchDuration = mgr.params.batchInterval
 	go mgr.startFilterSubLoop()
 	return mgr
 }
 
 func (mgr *FilterManager) startFilterSubLoop() {
+	defer utils.LogOnPanic()
 	ticker := time.NewTicker(mgr.filterSubBatchDuration)
 	defer ticker.Stop()
 	for {
@@ -105,8 +117,8 @@ func (mgr *FilterManager) startFilterSubLoop() {
 	}
 }
 
-// addFilter method checks if there are existing waiting filters for the pubsubTopic to be subscribed and adds the new filter to the same batch
-// once batchlimit is hit, all filters are subscribed to and new batch is created.
+// SubscribeFilter method checks if there are existing waiting filters for the pubsubTopic to be subscribed and adds the new filter to the same batch
+// once batch-limit is hit, all filters are subscribed to and new batch is created.
 // if node is not online, then batch is pushed to a queue to be picked up later for subscription and new batch is created
 
 func (mgr *FilterManager) SubscribeFilter(filterID string, cf protocol.ContentFilter) {
@@ -151,9 +163,11 @@ func (mgr *FilterManager) SubscribeFilter(filterID string, cf protocol.ContentFi
 }
 
 func (mgr *FilterManager) subscribeAndRunLoop(f filterConfig) {
+	defer utils.LogOnPanic()
 	ctx, cancel := context.WithCancel(mgr.ctx)
 	config := FilterConfig{MaxPeers: mgr.minPeersPerFilter}
-	sub, err := Subscribe(ctx, mgr.node, f.contentFilter, config, mgr.logger, mgr.opts...)
+
+	sub, err := Subscribe(ctx, mgr.node, f.contentFilter, config, mgr.logger, mgr.params)
 	mgr.Lock()
 	mgr.filterSubscriptions[f.ID] = SubDetails{cancel, sub}
 	mgr.Unlock()
@@ -171,36 +185,102 @@ func (mgr *FilterManager) NetworkChange() {
 	mgr.node.PingPeers() // ping all peers to check if subscriptions are alive
 }
 
+func (mgr *FilterManager) checkAndProcessQueue(pubsubTopic string) {
+	if len(mgr.waitingToSubQueue) > 0 {
+		for af := range mgr.waitingToSubQueue {
+			// TODO: change the below logic once topic specific health is implemented for lightClients
+			if pubsubTopic == "" || pubsubTopic == af.contentFilter.PubsubTopic {
+				// check if any filter subs are pending and subscribe them
+				mgr.logger.Debug("subscribing from filter queue", zap.String("filter-id", af.ID), zap.Stringer("content-filter", af.contentFilter))
+				go mgr.subscribeAndRunLoop(af)
+			} else {
+				mgr.waitingToSubQueue <- af
+			}
+			if len(mgr.waitingToSubQueue) == 0 {
+				mgr.logger.Debug("no pending subscriptions")
+				break
+			}
+		}
+	}
+}
+
+func (mgr *FilterManager) closeAndWait(wg *sync.WaitGroup, asub *SubDetails) {
+	defer wg.Done()
+	asub.cancel()
+	for {
+		env, ok := <-asub.sub.DataCh
+		if !ok {
+			mgr.logger.Debug("unsubscribed filter", zap.Strings("content-topics", asub.sub.ContentFilter.ContentTopics.ToList()))
+			return
+		}
+		// process any in-flight envelopes
+		err := mgr.envProcessor.OnNewEnvelope(env)
+		if err != nil {
+			mgr.logger.Error("invoking onNewEnvelopes error", zap.Error(err))
+		}
+	}
+}
+
+func (mgr *FilterManager) resubscribeAllSubscriptions() {
+	filterSubsCount := len(mgr.filterSubscriptions)
+	mgr.Lock()
+	mgr.logger.Debug("unsubscribing all filter subscriptions", zap.Int("subs-count", filterSubsCount))
+	var wg sync.WaitGroup
+	wg.Add(len(mgr.filterSubscriptions))
+
+	for _, asub := range mgr.filterSubscriptions {
+		go mgr.closeAndWait(&wg, &asub)
+	}
+	mgr.filterSubscriptions = make(map[string]SubDetails)
+
+	mgr.Unlock()
+
+	wg.Wait() //Waiting till all unsubs are done to avoid race between sub and unsub
+
+	mgr.logger.Debug("unsubscribed all filter subscriptions", zap.Int("subs-count", filterSubsCount))
+
+	// locking to protect filterConfigs map, can't lock while calling subscribe as same lock is acquired inside subscribe
+	mgr.Lock()
+	localMap := make(appFilterMap)
+	for filterID, config := range mgr.filterConfigs {
+		localMap[filterID] = config
+	}
+	mgr.Unlock()
+
+	for filterID, config := range localMap {
+		mgr.SubscribeFilter(filterID, config.contentFilter)
+	}
+
+}
+
 // OnConnectionStatusChange to be triggered when connection status change is detected either from offline to online or vice-versa
 // Note that pubsubTopic specific change can be triggered by specifying pubsubTopic,
 // if pubsubTopic is empty it indicates complete connection status change such as node went offline or came back online.
-func (mgr *FilterManager) OnConnectionStatusChange(pubsubTopic string, newStatus bool) {
+func (mgr *FilterManager) OnConnectionStatusChange(pubsubTopic string, newStatus bool, connType byte) {
 	subs := mgr.node.Subscriptions()
 	mgr.logger.Debug("inside on connection status change", zap.Bool("new-status", newStatus),
 		zap.Int("agg filters count", len(mgr.filterSubscriptions)), zap.Int("filter subs count", len(subs)))
+	/*
+		Checking for initialization condition because when filterManager is initialized networkConnType is set to 255 and when first time node goes online
+		the network conn type will be set and will trigger resubscribe which is not desired.
+		Change in connType refers to scenario where the localnode's network has changed e.g: a mobile switching between wifi and cellular,
+		this in-turn means ip address of the localnode has changed.
+		this can cause issues in filter-push where it never recovers and hence resubscribing all filters
+	*/
+	if mgr.networkConnType != initNetworkConnType &&
+		mgr.networkConnType != connType { //
+		// resubscribe all existing filters
+		go mgr.resubscribeAllSubscriptions()
+	}
 	if newStatus && !mgr.onlineChecker.IsOnline() { // switched from offline to Online
+		mgr.onlineChecker.SetOnline(newStatus)
 		mgr.NetworkChange()
 		mgr.logger.Debug("switching from offline to online")
 		mgr.Lock()
-		if len(mgr.waitingToSubQueue) > 0 {
-			for af := range mgr.waitingToSubQueue {
-				// TODO: change the below logic once topic specific health is implemented for lightClients
-				if pubsubTopic == "" || pubsubTopic == af.contentFilter.PubsubTopic {
-					// check if any filter subs are pending and subscribe them
-					mgr.logger.Debug("subscribing from filter queue", zap.String("filter-id", af.ID), zap.Stringer("content-filter", af.contentFilter))
-					go mgr.subscribeAndRunLoop(af)
-				} else {
-					mgr.waitingToSubQueue <- af
-				}
-				if len(mgr.waitingToSubQueue) == 0 {
-					mgr.logger.Debug("no pending subscriptions")
-					break
-				}
-			}
-		}
+		mgr.checkAndProcessQueue(pubsubTopic)
 		mgr.Unlock()
 	}
-
+	mgr.networkConnType = connType
 	mgr.onlineChecker.SetOnline(newStatus)
 }
 
@@ -221,6 +301,7 @@ func (mgr *FilterManager) UnsubscribeFilter(filterID string) {
 		}
 		if len(af.sub.ContentFilter.ContentTopics) == 0 {
 			af.cancel()
+			delete(mgr.filterSubscriptions, filterConfig.ID)
 		} else {
 			go af.sub.Unsubscribe(filterConfig.contentFilter)
 		}

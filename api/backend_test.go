@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
@@ -18,13 +17,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/status-im/status-go/protocol/tt"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	gethcrypto "github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/status-im/status-go/api/common"
 	"github.com/status-im/status-go/appdatabase"
 	"github.com/status-im/status-go/connection"
 	"github.com/status-im/status-go/eth-node/crypto"
@@ -35,15 +33,16 @@ import (
 	"github.com/status-im/status-go/node"
 	"github.com/status-im/status-go/params"
 	"github.com/status-im/status-go/protocol/requests"
+	"github.com/status-im/status-go/protocol/tt"
 	"github.com/status-im/status-go/rpc"
 	"github.com/status-im/status-go/services/typeddata"
 	"github.com/status-im/status-go/services/wallet"
 	walletservice "github.com/status-im/status-go/services/wallet"
+	"github.com/status-im/status-go/services/wallet/wallettypes"
 	"github.com/status-im/status-go/signal"
 	"github.com/status-im/status-go/sqlite"
 	"github.com/status-im/status-go/t/helpers"
 	"github.com/status-im/status-go/t/utils"
-	"github.com/status-im/status-go/transactions"
 	"github.com/status-im/status-go/walletdatabase"
 )
 
@@ -98,7 +97,10 @@ func setupGethStatusBackend() (*GethStatusBackend, func() error, func() error, f
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	backend := NewGethStatusBackend()
+	backend := NewGethStatusBackend(tt.MustCreateTestLogger())
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
 	backend.StatusNode().SetAppDB(db)
 
 	ma, stop2, err := setupTestMultiDB()
@@ -295,7 +297,8 @@ func TestBackendGettersConcurrently(t *testing.T) {
 
 func TestBackendConnectionChangesConcurrently(t *testing.T) {
 	connections := [...]string{connection.Wifi, connection.Cellular, connection.Unknown}
-	backend := NewGethStatusBackend()
+	backend := NewGethStatusBackend(tt.MustCreateTestLogger())
+
 	count := 3
 
 	var wg sync.WaitGroup
@@ -313,7 +316,8 @@ func TestBackendConnectionChangesConcurrently(t *testing.T) {
 }
 
 func TestBackendConnectionChangesToOffline(t *testing.T) {
-	b := NewGethStatusBackend()
+	b := NewGethStatusBackend(tt.MustCreateTestLogger())
+
 	b.ConnectionChange(connection.None, false)
 	assert.True(t, b.connectionState.Offline)
 
@@ -389,32 +393,32 @@ func TestBackendCallRPCConcurrently(t *testing.T) {
 }
 
 func TestAppStateChange(t *testing.T) {
-	backend := NewGethStatusBackend()
+	backend := NewGethStatusBackend(tt.MustCreateTestLogger())
 
 	var testCases = []struct {
 		name          string
-		fromState     appState
-		toState       appState
-		expectedState appState
+		fromState     AppState
+		toState       AppState
+		expectedState AppState
 	}{
 		{
 			name:          "success",
-			fromState:     appStateInactive,
-			toState:       appStateBackground,
-			expectedState: appStateBackground,
+			fromState:     AppStateInactive,
+			toState:       AppStateBackground,
+			expectedState: AppStateBackground,
 		},
 		{
 			name:          "invalid state",
-			fromState:     appStateInactive,
+			fromState:     AppStateInvalid,
 			toState:       "unexisting",
-			expectedState: appStateInactive,
+			expectedState: AppStateInvalid,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			backend.appState = tc.fromState
-			backend.AppStateChange(tc.toState.String())
+			backend.AppStateChange(tc.toState)
 			assert.Equal(t, tc.expectedState.String(), backend.appState.String())
 		})
 	}
@@ -463,7 +467,7 @@ func TestBlockedRPCMethods(t *testing.T) {
 }
 
 func TestCallRPCWithStoppedNode(t *testing.T) {
-	backend := NewGethStatusBackend()
+	backend := NewGethStatusBackend(tt.MustCreateTestLogger())
 
 	resp, err := backend.CallRPC(
 		`{"jsonrpc":"2.0","method":"web3_clientVersion","params":[],"id":1}`,
@@ -600,7 +604,7 @@ func TestBackendGetVerifiedAccount(t *testing.T) {
 		require.NoError(t, err)
 		address := gethcrypto.PubkeyToAddress(pkey.PublicKey)
 		key, err := backend.getVerifiedWalletAccount(address.String(), password)
-		require.EqualError(t, err, transactions.ErrAccountDoesntExist.Error())
+		require.EqualError(t, err, wallettypes.ErrAccountDoesntExist.Error())
 		require.Nil(t, key)
 	})
 
@@ -702,7 +706,8 @@ func TestBackendGetVerifiedAccount(t *testing.T) {
 func TestRuntimeLogLevelIsNotWrittenToDatabase(t *testing.T) {
 	utils.Init()
 
-	b := NewGethStatusBackend()
+	b := NewGethStatusBackend(tt.MustCreateTestLogger())
+
 	chatKey, err := gethcrypto.GenerateKey()
 	require.NoError(t, err)
 	walletKey, err := gethcrypto.GenerateKey()
@@ -770,7 +775,8 @@ func TestRuntimeLogLevelIsNotWrittenToDatabase(t *testing.T) {
 func TestLoginWithKey(t *testing.T) {
 	utils.Init()
 
-	b := NewGethStatusBackend()
+	b := NewGethStatusBackend(tt.MustCreateTestLogger())
+
 	chatKey, err := gethcrypto.GenerateKey()
 	require.NoError(t, err)
 	walletKey, err := gethcrypto.GenerateKey()
@@ -828,7 +834,8 @@ func TestLoginAccount(t *testing.T) {
 	tmpdir := t.TempDir()
 	nameserver := "8.8.8.8"
 
-	b := NewGethStatusBackend()
+	b := NewGethStatusBackend(tt.MustCreateTestLogger())
+
 	createAccountRequest := &requests.CreateAccount{
 		DisplayName:        "some-display-name",
 		CustomizationColor: "#ffffff",
@@ -845,7 +852,7 @@ func TestLoginAccount(t *testing.T) {
 			c <- struct{}{}
 		}
 	})
-	defer signal.SetMobileSignalHandler(nil)
+	t.Cleanup(signal.ResetMobileSignalHandler)
 	waitForLogin := func(chan interface{}) {
 		select {
 		case <-c:
@@ -858,6 +865,7 @@ func TestLoginAccount(t *testing.T) {
 	acc, err := b.CreateAccountAndLogin(createAccountRequest)
 	require.NoError(t, err)
 	require.Equal(t, nameserver, b.config.WakuV2Config.Nameserver)
+	require.True(t, acc.HasAcceptedTerms)
 
 	waitForLogin(c)
 	require.NoError(t, b.Logout())
@@ -882,110 +890,11 @@ func TestLoginAccount(t *testing.T) {
 	require.Equal(t, nameserver, b.config.WakuV2Config.Nameserver)
 }
 
-func TestEnableInstallationAndPair(t *testing.T) {
-	// create account acc
-	utils.Init()
-	displayName := "some-display-name"
-	password := "some-password"
-	tmpdir := t.TempDir()
-	nameserver := "8.8.8.8"
-	b := NewGethStatusBackend()
-	createAccountRequest := &requests.CreateAccount{
-		DisplayName:        displayName,
-		CustomizationColor: "#ffffff",
-		Password:           password,
-		RootDataDir:        tmpdir,
-		LogFilePath:        tmpdir + "/log",
-		WakuV2Nameserver:   &nameserver,
-		WakuV2Fleet:        "status.staging",
-	}
-	acc, err := b.CreateAccountAndLogin(createAccountRequest)
-	require.NoError(t, err)
-	require.NotNil(t, acc)
-	_, err = b.Messenger().Start()
-	require.NoError(t, err)
-	s, err := b.GetSettings()
-	require.NoError(t, err)
-	mn := *s.Mnemonic
-	db, err := accounts.NewDB(b.appDB)
-	require.NoError(t, err)
-	n, err := db.GetSettingLastSynced(settings.DisplayName)
-	require.NoError(t, err)
-	require.True(t, n > 0)
-
-	// restore account acc as acc2 use Mnemonic from acc
-	restoreRequest := &requests.RestoreAccount{
-		Mnemonic:    mn,
-		FetchBackup: true,
-		CreateAccount: requests.CreateAccount{
-			Password:           password,
-			CustomizationColor: "0x000000",
-			RootDataDir:        t.TempDir(),
-		},
-	}
-	b2 := NewGethStatusBackend()
-	acc2, err := b2.RestoreAccountAndLogin(restoreRequest)
-	require.NoError(t, err)
-	require.NotNil(t, acc2)
-	_, err = b2.Messenger().Start()
-	require.NoError(t, err)
-	s2, err := b2.GetSettings()
-	require.NoError(t, err)
-
-	t.Logf("acc2 settings.name: %s", s2.Name)
-	// should be 3 words random name
-	require.Len(t, strings.Split(s2.Name, " "), 3)
-	require.Empty(t, acc2.Name)
-	require.Empty(t, s2.DisplayName)
-	db2, err := accounts.NewDB(b2.appDB)
-	require.NoError(t, err)
-	n, err = db2.GetSettingLastSynced(settings.DisplayName)
-	require.NoError(t, err)
-	require.True(t, n == 0)
-
-	// pair installation
-	_, err = b2.Messenger().EnableInstallationAndPair(&requests.EnableInstallationAndPair{InstallationID: s.InstallationID})
-	require.NoError(t, err)
-	// ensure acc received the installation from acc2
-	err = tt.RetryWithBackOff(func() error {
-		r, err := b.Messenger().RetrieveAll()
-		require.NoError(t, err)
-		if len(r.Installations()) > 0 {
-			return nil
-		}
-		return errors.New("new installation not received yet")
-	})
-	require.NoError(t, err)
-
-	// sync data from acc to acc2
-	err = b.Messenger().EnableAndSyncInstallation(&requests.EnableAndSyncInstallation{InstallationID: s2.InstallationID})
-	require.NoError(t, err)
-	// ensure acc2's display name get synced
-	err = tt.RetryWithBackOff(func() error {
-		r, err := b2.Messenger().RetrieveAll()
-		require.NoError(t, err)
-		for _, ss := range r.Settings {
-			if ss.GetDBName() == "display_name" {
-				return nil
-			}
-		}
-		return errors.New("display name setting not received yet")
-	})
-	require.NoError(t, err)
-
-	// check display name for acc2
-	s2, err = b2.GetSettings()
-	require.NoError(t, err)
-	require.Equal(t, displayName, s2.DisplayName)
-	acc2, err = b2.GetActiveAccount()
-	require.NoError(t, err)
-	require.Equal(t, displayName, acc2.Name)
-}
-
 func TestVerifyDatabasePassword(t *testing.T) {
 	utils.Init()
 
-	b := NewGethStatusBackend()
+	b := NewGethStatusBackend(tt.MustCreateTestLogger())
+
 	chatKey, err := gethcrypto.GenerateKey()
 	require.NoError(t, err)
 	walletKey, err := gethcrypto.GenerateKey()
@@ -1023,7 +932,7 @@ func TestVerifyDatabasePassword(t *testing.T) {
 }
 
 func TestDeleteMultiaccount(t *testing.T) {
-	backend := NewGethStatusBackend()
+	backend := NewGethStatusBackend(tt.MustCreateTestLogger())
 
 	rootDataDir := t.TempDir()
 
@@ -1382,7 +1291,7 @@ func loginDesktopUser(t *testing.T, conf *params.NodeConfig) {
 	username := "TestUser"
 	passwd := "0xC888C9CE9E098D5864D3DED6EBCC140A12142263BACE3A23A36F9905F12BD64A" // #nosec G101
 
-	b := NewGethStatusBackend()
+	b := NewGethStatusBackend(tt.MustCreateTestLogger())
 
 	require.NoError(t, b.AccountManager().InitKeystore(conf.KeyStoreDir))
 	b.UpdateRootDataDir(conf.DataDir)
@@ -1431,7 +1340,7 @@ func TestChangeDatabasePassword(t *testing.T) {
 	oldPassword := "password"
 	newPassword := "newPassword"
 
-	backend := NewGethStatusBackend()
+	backend := NewGethStatusBackend(tt.MustCreateTestLogger())
 	backend.UpdateRootDataDir(t.TempDir())
 
 	// Setup keystore to test decryption of it
@@ -1488,7 +1397,7 @@ func TestCreateWallet(t *testing.T) {
 	password := "some-password2" // nolint: goconst
 	tmpdir := t.TempDir()
 
-	b := NewGethStatusBackend()
+	b := NewGethStatusBackend(tt.MustCreateTestLogger())
 	defer func() {
 		require.NoError(t, b.StopNode())
 	}()
@@ -1506,6 +1415,7 @@ func TestCreateWallet(t *testing.T) {
 			c <- struct{}{}
 		}
 	})
+	t.Cleanup(signal.ResetMobileSignalHandler)
 
 	account, err := b.CreateAccountAndLogin(createAccountRequest)
 	require.NoError(t, err)
@@ -1552,7 +1462,7 @@ func TestSetFleet(t *testing.T) {
 	password := "some-password2" // nolint: goconst
 	tmpdir := t.TempDir()
 
-	b := NewGethStatusBackend()
+	b := NewGethStatusBackend(tt.MustCreateTestLogger())
 	createAccountRequest := &requests.CreateAccount{
 		DisplayName:        "some-display-name",
 		CustomizationColor: "#ffffff",
@@ -1566,6 +1476,7 @@ func TestSetFleet(t *testing.T) {
 			c <- struct{}{}
 		}
 	})
+	t.Cleanup(signal.ResetMobileSignalHandler)
 
 	newAccount, err := b.CreateAccountAndLogin(createAccountRequest)
 	require.NoError(t, err)
@@ -1617,10 +1528,12 @@ func TestWalletConfigOnLoginAccount(t *testing.T) {
 	alchemyArbitrumSepoliaToken := "alchemy-arbitrum-sepolia-token"
 	alchemyOptimismMainnetToken := "alchemy-optimism-mainnet-token"
 	alchemyOptimismSepoliaToken := "alchemy-optimism-sepolia-token"
-	raribleMainnetAPIKey := "rarible-mainnet-api-key" // nolint: gosec
-	raribleTestnetAPIKey := "rarible-testnet-api-key" // nolint: gosec
+	alchemyBaseMainnetToken := "alchemy-base-mainnet-token" // nolint: gosec
+	alchemyBaseSepoliaToken := "alchemy-base-sepolia-token" // nolint: gosec
+	raribleMainnetAPIKey := "rarible-mainnet-api-key"       // nolint: gosec
+	raribleTestnetAPIKey := "rarible-testnet-api-key"       // nolint: gosec
 
-	b := NewGethStatusBackend()
+	b := NewGethStatusBackend(tt.MustCreateTestLogger())
 	createAccountRequest := &requests.CreateAccount{
 		DisplayName:        "some-display-name",
 		CustomizationColor: "#ffffff",
@@ -1634,6 +1547,7 @@ func TestWalletConfigOnLoginAccount(t *testing.T) {
 			c <- struct{}{}
 		}
 	})
+	t.Cleanup(signal.ResetMobileSignalHandler)
 
 	newAccount, err := b.CreateAccountAndLogin(createAccountRequest)
 	require.NoError(t, err)
@@ -1654,6 +1568,8 @@ func TestWalletConfigOnLoginAccount(t *testing.T) {
 			AlchemyArbitrumSepoliaToken: alchemyArbitrumSepoliaToken,
 			AlchemyOptimismMainnetToken: alchemyOptimismMainnetToken,
 			AlchemyOptimismSepoliaToken: alchemyOptimismSepoliaToken,
+			AlchemyBaseMainnetToken:     alchemyBaseMainnetToken,
+			AlchemyBaseSepoliaToken:     alchemyBaseSepoliaToken,
 			RaribleMainnetAPIKey:        raribleMainnetAPIKey,
 			RaribleTestnetAPIKey:        raribleTestnetAPIKey,
 		},
@@ -1668,12 +1584,14 @@ func TestWalletConfigOnLoginAccount(t *testing.T) {
 	}
 
 	require.Equal(t, b.config.WalletConfig.InfuraAPIKey, infuraToken)
-	require.Equal(t, b.config.WalletConfig.AlchemyAPIKeys[mainnetChainID], alchemyEthereumMainnetToken)
-	require.Equal(t, b.config.WalletConfig.AlchemyAPIKeys[sepoliaChainID], alchemyEthereumSepoliaToken)
-	require.Equal(t, b.config.WalletConfig.AlchemyAPIKeys[arbitrumChainID], alchemyArbitrumMainnetToken)
-	require.Equal(t, b.config.WalletConfig.AlchemyAPIKeys[arbitrumSepoliaChainID], alchemyArbitrumSepoliaToken)
-	require.Equal(t, b.config.WalletConfig.AlchemyAPIKeys[optimismChainID], alchemyOptimismMainnetToken)
-	require.Equal(t, b.config.WalletConfig.AlchemyAPIKeys[optimismSepoliaChainID], alchemyOptimismSepoliaToken)
+	require.Equal(t, b.config.WalletConfig.AlchemyAPIKeys[common.MainnetChainID], alchemyEthereumMainnetToken)
+	require.Equal(t, b.config.WalletConfig.AlchemyAPIKeys[common.SepoliaChainID], alchemyEthereumSepoliaToken)
+	require.Equal(t, b.config.WalletConfig.AlchemyAPIKeys[common.ArbitrumChainID], alchemyArbitrumMainnetToken)
+	require.Equal(t, b.config.WalletConfig.AlchemyAPIKeys[common.ArbitrumSepoliaChainID], alchemyArbitrumSepoliaToken)
+	require.Equal(t, b.config.WalletConfig.AlchemyAPIKeys[common.OptimismChainID], alchemyOptimismMainnetToken)
+	require.Equal(t, b.config.WalletConfig.AlchemyAPIKeys[common.OptimismSepoliaChainID], alchemyOptimismSepoliaToken)
+	require.Equal(t, b.config.WalletConfig.AlchemyAPIKeys[common.BaseChainID], alchemyBaseMainnetToken)
+	require.Equal(t, b.config.WalletConfig.AlchemyAPIKeys[common.BaseSepoliaChainID], alchemyBaseSepoliaToken)
 	require.Equal(t, b.config.WalletConfig.RaribleMainnetAPIKey, raribleMainnetAPIKey)
 	require.Equal(t, b.config.WalletConfig.RaribleTestnetAPIKey, raribleTestnetAPIKey)
 
@@ -1684,7 +1602,7 @@ func TestTestnetEnabledSettingOnCreateAccount(t *testing.T) {
 	utils.Init()
 	tmpdir := t.TempDir()
 
-	b := NewGethStatusBackend()
+	b := NewGethStatusBackend(tt.MustCreateTestLogger())
 
 	// Creating an account with test networks enabled
 	createAccountRequest1 := &requests.CreateAccount{
@@ -1730,7 +1648,7 @@ func TestRestoreAccountAndLogin(t *testing.T) {
 	utils.Init()
 	tmpdir := t.TempDir()
 
-	backend := NewGethStatusBackend()
+	backend := NewGethStatusBackend(tt.MustCreateTestLogger())
 
 	// Test case 1: Valid restore account request
 	restoreRequest := &requests.RestoreAccount{
@@ -1747,6 +1665,7 @@ func TestRestoreAccountAndLogin(t *testing.T) {
 	account, err := backend.RestoreAccountAndLogin(restoreRequest)
 	require.NoError(t, err)
 	require.NotNil(t, account)
+	require.Equal(t, "Account1", account.Name)
 
 	// Test case 2: Invalid restore account request
 	invalidRequest := &requests.RestoreAccount{}
@@ -1758,6 +1677,53 @@ func TestRestoreAccountAndLogin(t *testing.T) {
 	mnemonic, err := db.Mnemonic()
 	require.NoError(t, err)
 	require.Empty(t, mnemonic)
+}
+
+func TestRestoreAccountAndLoginWithoutDisplayName(t *testing.T) {
+	utils.Init()
+	tmpdir := t.TempDir()
+
+	backend := NewGethStatusBackend(tt.MustCreateTestLogger())
+
+	// Test case: Valid restore account request without DisplayName
+	restoreRequest := &requests.RestoreAccount{
+		Mnemonic:    "test test test test test test test test test test test test",
+		FetchBackup: false,
+		CreateAccount: requests.CreateAccount{
+			DeviceName:         "StatusIM",
+			Password:           "password",
+			CustomizationColor: "0x000000",
+			RootDataDir:        tmpdir,
+		},
+	}
+	account, err := backend.RestoreAccountAndLogin(restoreRequest)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.NotEmpty(t, account.Name)
+}
+
+func TestAcceptTerms(t *testing.T) {
+	tmpdir := t.TempDir()
+	b := NewGethStatusBackend(tt.MustCreateTestLogger())
+	conf, err := params.NewNodeConfig(tmpdir, 1777)
+	require.NoError(t, err)
+	require.NoError(t, b.AccountManager().InitKeystore(conf.KeyStoreDir))
+	b.UpdateRootDataDir(conf.DataDir)
+	require.NoError(t, b.OpenAccounts())
+	nameserver := "8.8.8.8"
+	createAccountRequest := &requests.CreateAccount{
+		DisplayName:        "some-display-name",
+		CustomizationColor: "#ffffff",
+		Password:           "some-password",
+		RootDataDir:        tmpdir,
+		LogFilePath:        tmpdir + "/log",
+		WakuV2Nameserver:   &nameserver,
+		WakuV2Fleet:        "status.staging",
+	}
+	_, err = b.CreateAccountAndLogin(createAccountRequest)
+	require.NoError(t, err)
+	err = b.AcceptTerms()
+	require.NoError(t, err)
 }
 
 func TestCreateAccountPathsValidation(t *testing.T) {
@@ -1882,14 +1848,13 @@ func TestRestoreKeycardAccountAndLogin(t *testing.T) {
 				"raribleMainnetApiKey":        "",
 				"raribleTestnetApiKey":        "",
 				"alchemyEthereumMainnetToken": "",
-				"alchemyEthereumGoerliToken":  "",
 				"alchemyEthereumSepoliaToken": "",
 				"alchemyArbitrumMainnetToken": "",
-				"alchemyArbitrumGoerliToken":  "",
 				"alchemyArbitrumSepoliaToken": "",
 				"alchemyOptimismMainnetToken": "",
-				"alchemyOptimismGoerliToken":  "",
 				"alchemyOptimismSepoliaToken": "",
+				"alchemyBaseMainnetToken":     "",
+				"alchemyBaseSepoliaToken":     "",
 			},
 			"torrentConfigEnabled":   false,
 			"torrentConfigPort":      0,
@@ -1904,7 +1869,8 @@ func TestRestoreKeycardAccountAndLogin(t *testing.T) {
 	conf, err := params.NewNodeConfig(tmpdir, 1777)
 	require.NoError(t, err)
 
-	backend := NewGethStatusBackend()
+	backend := NewGethStatusBackend(tt.MustCreateTestLogger())
+	require.NoError(t, err)
 
 	require.NoError(t, backend.AccountManager().InitKeystore(conf.KeyStoreDir))
 	backend.UpdateRootDataDir(conf.DataDir)

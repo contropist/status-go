@@ -7,11 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/status-im/status-go/appdatabase"
-	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/protocol/common/shard"
 	"github.com/status-im/status-go/protocol/sqlite"
 	"github.com/status-im/status-go/protocol/transport"
 	"github.com/status-im/status-go/t/helpers"
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 func setupTestDB(t *testing.T) (*Database, func()) {
@@ -27,11 +27,11 @@ func TestAddGetDeleteMailserver(t *testing.T) {
 	defer close()
 	api := &API{db: db}
 	testMailserver := Mailserver{
-		ID:      "mailserver001",
-		Name:    "My Mailserver",
-		Address: "enode://...",
-		Custom:  true,
-		Fleet:   "prod",
+		ID:     "mailserver001",
+		Name:   "My Mailserver",
+		Addr:   MustDecodeMultiaddress("/dns4/node-01.do-ams3.waku.test.status.im/tcp/30303/p2p/16Uiu2HAkykgaECHswi3YKJ5dMLbq2kPVCo89fcyTd38UcQD6ej5W"),
+		Custom: true,
+		Fleet:  "prod",
 	}
 	testMailserverWithPassword := testMailserver
 	testMailserverWithPassword.ID = "mailserver002"
@@ -78,14 +78,14 @@ func TestTopic(t *testing.T) {
 		// Existing topic, is not updated
 		{
 			PubsubTopic:  shard.DefaultShardPubsubTopic(),
-			ContentTopic: types.BytesToTopic([]byte{0x61}),
+			ContentTopic: wakutypes.BytesToTopic([]byte{0x61}),
 		},
 		// Non existing topic is not inserted
 		{
 			Discovery:    true,
 			Negotiated:   true,
 			PubsubTopic:  shard.DefaultShardPubsubTopic(),
-			ContentTopic: types.BytesToTopic([]byte{0x64}),
+			ContentTopic: wakutypes.BytesToTopic([]byte{0x64}),
 		},
 	}
 

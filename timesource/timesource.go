@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/beevik/ntp"
+	"go.uber.org/zap"
 
-	"github.com/ethereum/go-ethereum/log"
+	"github.com/status-im/status-go/common"
+	"github.com/status-im/status-go/logutils"
 )
 
 const (
@@ -73,6 +75,7 @@ func computeOffset(timeQuery ntpQuery, servers []string, allowedFailures int) (t
 	responses := make(chan queryResponse, len(servers))
 	for _, server := range servers {
 		go func(server string) {
+			defer common.LogOnPanic()
 			response, err := timeQuery(server, ntp.QueryOptions{
 				Timeout: DefaultRPCTimeout,
 			})
@@ -159,10 +162,10 @@ func (s *NTPTimeSource) Now() time.Time {
 func (s *NTPTimeSource) updateOffset() error {
 	offset, err := computeOffset(s.timeQuery, s.servers, s.allowedFailures)
 	if err != nil {
-		log.Error("failed to compute offset", "error", err)
+		logutils.ZapLogger().Error("failed to compute offset", zap.Error(err))
 		return errUpdateOffset
 	}
-	log.Info("Difference with ntp servers", "offset", offset)
+	logutils.ZapLogger().Info("Difference with ntp servers", zap.Duration("offset", offset))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.latestOffset = offset
@@ -183,6 +186,7 @@ func (s *NTPTimeSource) runPeriodically(fn func() error, starWithSlowSyncPeriod 
 	}
 	s.quit = make(chan struct{})
 	go func() {
+		defer common.LogOnPanic()
 		for {
 			select {
 			case <-time.After(period):
@@ -210,7 +214,7 @@ func (s *NTPTimeSource) Start() {
 	if err != nil {
 		// Failure to update can occur if the node is offline.
 		// Instead of returning an error, continue with the process as the update will be retried periodically.
-		log.Error("failed to update offset", err)
+		logutils.ZapLogger().Error("failed to update offset", zap.Error(err))
 	}
 
 	s.runPeriodically(s.updateOffset, err == nil)

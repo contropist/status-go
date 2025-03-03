@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/status-im/status-go/eth-node/types"
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 func TestMessengerVerificationRequests(t *testing.T) { // nolint: deadcode,unused
@@ -762,10 +763,57 @@ func (s *MessengerVerificationRequests) TestCancelVerificationRequest() {
 	s.Require().Equal(resp.Messages()[0].ContactVerificationState, common.ContactVerificationStateCanceled)
 }
 
-func (s *MessengerVerificationRequests) newMessenger(shh types.Waku) *Messenger {
+func (s *MessengerVerificationRequests) newMessenger(shh wakutypes.Waku) *Messenger {
 	privateKey, err := crypto.GenerateKey()
 	s.Require().NoError(err)
 	messenger, err := newMessengerWithKey(s.shh, privateKey, s.logger, nil)
 	s.Require().NoError(err)
 	return messenger
+}
+
+func (s *MessengerVerificationRequests) TestTrustStatus() {
+	theirMessenger := s.newMessenger(s.shh)
+	defer TearDownMessenger(&s.Suite, theirMessenger)
+
+	s.mutualContact(theirMessenger)
+
+	theirPk := types.EncodeHex(crypto.FromECDSAPub(&theirMessenger.identity.PublicKey))
+
+	// Test Mark as Trusted
+	err := s.m.MarkAsTrusted(context.Background(), theirPk)
+	s.Require().NoError(err)
+
+	contactFromCache, ok := s.m.allContacts.Load(theirPk)
+	s.Require().True(ok)
+	s.Require().Equal(verification.TrustStatusTRUSTED, contactFromCache.TrustStatus)
+	trustStatusFromDb, err := s.m.GetTrustStatus(theirPk)
+	s.Require().NoError(err)
+	s.Require().Equal(verification.TrustStatusTRUSTED, trustStatusFromDb)
+
+	// Test Remove Trust Mark
+	err = s.m.RemoveTrustStatus(context.Background(), theirPk)
+	s.Require().NoError(err)
+
+	contactFromCache, ok = s.m.allContacts.Load(theirPk)
+	s.Require().True(ok)
+	s.Require().Equal(verification.TrustStatusUNKNOWN, contactFromCache.TrustStatus)
+	trustStatusFromDb, err = s.m.GetTrustStatus(theirPk)
+	s.Require().NoError(err)
+	s.Require().Equal(verification.TrustStatusUNKNOWN, trustStatusFromDb)
+
+	// Test Mark as Untrustoworthy
+	err = s.m.MarkAsUntrustworthy(context.Background(), theirPk)
+	s.Require().NoError(err)
+
+	contactFromCache, ok = s.m.allContacts.Load(theirPk)
+	s.Require().True(ok)
+	s.Require().Equal(verification.TrustStatusUNTRUSTWORTHY, contactFromCache.TrustStatus)
+	trustStatusFromDb, err = s.m.GetTrustStatus(theirPk)
+	s.Require().NoError(err)
+	s.Require().Equal(verification.TrustStatusUNTRUSTWORTHY, trustStatusFromDb)
+
+	// Test calling with an unknown contact
+	err = s.m.MarkAsTrusted(context.Background(), "0x00000123")
+	s.Require().Error(err)
+	s.Require().Equal("contact not found", err.Error())
 }

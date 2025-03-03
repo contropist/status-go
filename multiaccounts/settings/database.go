@@ -8,10 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethereum/go-ethereum/log"
-
 	"github.com/status-im/status-go/common/dbsetup"
 	"github.com/status-im/status-go/eth-node/types"
+	"github.com/status-im/status-go/logutils"
 	"github.com/status-im/status-go/multiaccounts/errors"
 	"github.com/status-im/status-go/nodecfg"
 	"github.com/status-im/status-go/params"
@@ -142,7 +141,6 @@ INSERT INTO settings (
   profile_pictures_show_to,
   profile_pictures_visibility,
   url_unfurling_mode,
-  omit_transfers_history_scan,
   mnemonic_was_not_shown,
   wallet_token_preferences_group_by_community,
   wallet_collectible_preferences_group_by_collection,
@@ -151,7 +149,7 @@ INSERT INTO settings (
   fleet
 ) VALUES (
 ?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-?,?,?,?,?,?,?,?,?,'id',?,?,?,?,?,?,?,?,?,?,?)`,
+?,?,?,?,?,?,?,?,?,'id',?,?,?,?,?,?,?,?,?,?)`,
 		s.Address,
 		s.Currency,
 		s.CurrentNetwork,
@@ -179,7 +177,6 @@ INSERT INTO settings (
 		s.ProfilePicturesShowTo,
 		s.ProfilePicturesVisibility,
 		s.URLUnfurlingMode,
-		s.OmitTransfersHistoryScan,
 		s.MnemonicWasNotShown,
 		s.TokenGroupByCommunity,
 		s.CollectibleGroupByCollection,
@@ -387,9 +384,9 @@ func (db *Database) GetSettings() (Settings, error) {
 		profile_pictures_show_to, profile_pictures_visibility, wallet_root_address, wallet_set_up_passed, wallet_visible_tokens,
 		waku_bloom_filter_mode, webview_allow_permission_requests, current_user_status, send_status_updates, gif_recents,
 		gif_favorites, opensea_enabled, last_backup, backup_enabled, telemetry_server_url, auto_message_enabled, gif_api_key,
-		test_networks_enabled, mutual_contact_enabled, profile_migration_needed, is_goerli_enabled, wallet_token_preferences_group_by_community, url_unfurling_mode,
-		omit_transfers_history_scan, mnemonic_was_not_shown, wallet_show_community_asset_when_sending_tokens, wallet_display_assets_below_balance,
-		wallet_display_assets_below_balance_threshold, wallet_collectible_preferences_group_by_collection, wallet_collectible_preferences_group_by_community, 
+		test_networks_enabled, mutual_contact_enabled, profile_migration_needed, wallet_token_preferences_group_by_community, url_unfurling_mode,
+		mnemonic_was_not_shown, wallet_show_community_asset_when_sending_tokens, wallet_display_assets_below_balance,
+		wallet_display_assets_below_balance_threshold, wallet_collectible_preferences_group_by_collection, wallet_collectible_preferences_group_by_community,
 		peer_syncing_enabled
 	FROM
 		settings
@@ -464,10 +461,8 @@ func (db *Database) GetSettings() (Settings, error) {
 		&s.TestNetworksEnabled,
 		&s.MutualContactEnabled,
 		&s.ProfileMigrationNeeded,
-		&s.IsGoerliEnabled,
 		&s.TokenGroupByCommunity,
 		&s.URLUnfurlingMode,
-		&s.OmitTransfersHistoryScan,
 		&s.MnemonicWasNotShown,
 		&s.ShowCommunityAssetWhenSendingTokens,
 		&s.DisplayAssetsBelowBalance,
@@ -755,14 +750,6 @@ func (db *Database) GetTestNetworksEnabled() (result bool, err error) {
 	return result, err
 }
 
-func (db *Database) GetIsGoerliEnabled() (result bool, err error) {
-	err = db.makeSelectRow(IsGoerliEnabled).Scan(&result)
-	if err == sql.ErrNoRows {
-		return result, nil
-	}
-	return result, err
-}
-
 func (db *Database) SetPeerSyncingEnabled(value bool) error {
 	return db.SaveSettingField(PeerSyncingEnabled, value)
 }
@@ -848,7 +835,7 @@ func (db *Database) postChangesToSubscribers(change *SyncSettingField) {
 		select {
 		case s <- change:
 		default:
-			log.Warn("settings changes subscription channel full, dropping message")
+			logutils.ZapLogger().Warn("settings changes subscription channel full, dropping message")
 		}
 	}
 }

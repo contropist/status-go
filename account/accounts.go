@@ -14,12 +14,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 
 	gethkeystore "github.com/ethereum/go-ethereum/accounts/keystore"
 	gethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/status-im/status-go/account/generator"
+	gocommon "github.com/status-im/status-go/common"
 	"github.com/status-im/status-go/eth-node/crypto"
 	"github.com/status-im/status-go/eth-node/keystore"
 	"github.com/status-im/status-go/eth-node/types"
@@ -100,6 +101,8 @@ type DefaultManager struct {
 	selectedChatAccount *SelectedExtKey // account that was processed during the last call to SelectAccount()
 	mainAccountAddress  types.Address
 	watchAddresses      []types.Address
+
+	logger *zap.Logger
 }
 
 // GetKeystore is only used in tests
@@ -228,7 +231,7 @@ func (m *DefaultManager) VerifyAccountPassword(keyStoreDir, address, password st
 
 	// avoid swap attack
 	if key.Address != addressObj {
-		return nil, fmt.Errorf("account mismatch: have %s, want %s", key.Address.Hex(), addressObj.Hex())
+		return nil, fmt.Errorf("account mismatch: have %s, want %s", gocommon.TruncateWithDot(key.Address.Hex()), gocommon.TruncateWithDot(addressObj.Hex()))
 	}
 
 	return key, nil
@@ -642,13 +645,13 @@ func (m *DefaultManager) ReEncryptKeyStoreDir(keyDirPath, oldPass, newPass strin
 	err = os.RemoveAll(tempKeyDirPath)
 	if err != nil {
 		// the re-encryption is complete so we don't throw
-		log.Error("unable to delete tempKeyDirPath, manual cleanup required")
+		m.logger.Error("unable to delete tempKeyDirPath, manual cleanup required")
 	}
 
 	err = os.RemoveAll(backupKeyDirPath)
 	if err != nil {
 		// the re-encryption is complete so we don't throw
-		log.Error("unable to delete backupKeyDirPath, manual cleanup required")
+		m.logger.Error("unable to delete backupKeyDirPath, manual cleanup required")
 	}
 
 	return nil

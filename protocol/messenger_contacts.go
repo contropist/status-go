@@ -9,11 +9,10 @@ import (
 	"github.com/golang/protobuf/proto"
 	"go.uber.org/zap"
 
-	"github.com/ethereum/go-ethereum/log"
-
 	"github.com/status-im/status-go/deprecation"
 	"github.com/status-im/status-go/eth-node/crypto"
 	"github.com/status-im/status-go/eth-node/types"
+	"github.com/status-im/status-go/logutils"
 	multiaccountscommon "github.com/status-im/status-go/multiaccounts/common"
 	"github.com/status-im/status-go/protocol/common"
 	"github.com/status-im/status-go/protocol/protobuf"
@@ -602,6 +601,7 @@ func (m *Messenger) generateContactRequest(clock uint64, timestamp uint64, conta
 	contactRequest := common.NewMessage()
 	contactRequest.ChatId = contact.ID
 	contactRequest.WhisperTimestamp = timestamp
+	contactRequest.Timestamp = timestamp
 	contactRequest.Seen = true
 	contactRequest.Text = text
 	if outgoing {
@@ -779,7 +779,7 @@ func (m *Messenger) updateContactImagesURL(contact *Contact) error {
 			if err != nil {
 				return err
 			}
-			v.LocalURL = m.httpServer.MakeContactImageURL(common.PubkeyToHex(publicKey), k)
+			v.LocalURL = m.httpServer.MakeContactImageURL(common.PubkeyToHex(publicKey), k, v.Clock)
 			contact.Images[k] = v
 		}
 	}
@@ -974,35 +974,13 @@ func (m *Messenger) BlockContact(ctx context.Context, contactID string, fromSync
 	//		 https://github.com/status-im/status-go/issues/3720
 	if !fromSyncing {
 		updatedAt := m.GetCurrentTimeInMillis()
-		_, err = m.DismissAllActivityCenterNotificationsFromUser(ctx, contactID, updatedAt)
+		notifications, err := m.DismissAllActivityCenterNotificationsFromUser(ctx, contactID, updatedAt)
 		if err != nil {
 			return nil, err
 		}
+		response.AddActivityCenterNotifications(notifications)
 	}
 
-	return response, nil
-}
-
-// The same function as the one above.
-// Should be removed with https://github.com/status-im/status-desktop/issues/8805
-func (m *Messenger) BlockContactDesktop(ctx context.Context, contactID string) (*MessengerResponse, error) {
-	response := &MessengerResponse{}
-
-	err := m.blockContact(ctx, response, contactID, true, false)
-	if err != nil {
-		return nil, err
-	}
-
-	response, err = m.DeclineAllPendingGroupInvitesFromUser(ctx, response, contactID)
-	if err != nil {
-		return nil, err
-	}
-
-	notifications, err := m.DismissAllActivityCenterNotificationsFromUser(ctx, contactID, m.GetCurrentTimeInMillis())
-	if err != nil {
-		return nil, err
-	}
-	response.AddActivityCenterNotifications(notifications)
 	return response, nil
 }
 
@@ -1322,7 +1300,7 @@ func (m *Messenger) FetchContact(contactID string, waitForResponse bool) (*Conta
 	options := []StoreNodeRequestOption{
 		WithWaitForResponseOption(waitForResponse),
 	}
-	contact, _, err := m.storeNodeRequestsManager.FetchContact(contactID, options)
+	contact, _, err := m.storeNodeRequestsManager.FetchContact(m.ctx, contactID, options)
 	return contact, err
 }
 
@@ -1337,7 +1315,7 @@ func (m *Messenger) publishSelfContactSubscriptions(event *SelfContactChangeEven
 		select {
 		case s <- event:
 		default:
-			log.Warn("self contact subscription channel full, dropping message")
+			logutils.ZapLogger().Warn("self contact subscription channel full, dropping message")
 		}
 	}
 }

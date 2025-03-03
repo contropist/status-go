@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"sync"
 
+	"go.uber.org/zap"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/event"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/rpc"
+	gocommon "github.com/status-im/status-go/common"
+	"github.com/status-im/status-go/logutils"
 	"github.com/status-im/status-go/multiaccounts/accounts"
 	"github.com/status-im/status-go/services/wallet/transfer"
 	"github.com/status-im/status-go/signal"
@@ -155,7 +158,7 @@ func PushMessages(ns []*Notification) {
 }
 
 func pushMessage(notification *Notification) {
-	log.Debug("Pushing a new push notification")
+	logutils.ZapLogger().Debug("Pushing a new push notification")
 	signal.SendLocalNotifications(notification)
 }
 
@@ -171,6 +174,7 @@ func (s *Service) Start() error {
 
 	s.transmitter.wg.Add(1)
 	go func() {
+		defer gocommon.LogOnPanic()
 		defer s.transmitter.wg.Done()
 		for {
 			select {
@@ -179,7 +183,7 @@ func (s *Service) Start() error {
 				return
 			case err := <-sub.Err():
 				if err != nil {
-					log.Error("Local notifications transmitter failed with", "error", err)
+					logutils.ZapLogger().Error("Local notifications transmitter failed with", zap.Error(err))
 				}
 				return
 			case event := <-events:
@@ -188,7 +192,7 @@ func (s *Service) Start() error {
 		}
 	}()
 
-	log.Info("Successful start")
+	logutils.ZapLogger().Info("Successful start")
 
 	return nil
 }

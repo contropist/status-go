@@ -8,7 +8,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/status-im/status-go/eth-node/types"
-	waku "github.com/status-im/status-go/waku/common"
+	wakutypes "github.com/status-im/status-go/waku/types"
+	wakuv1common "github.com/status-im/status-go/wakuv1/common"
 )
 
 func TestLevelDB_BuildIteratorWithTopic(t *testing.T) {
@@ -23,23 +24,23 @@ func TestLevelDB_BuildIteratorWithTopic(t *testing.T) {
 	require.NoError(t, err)
 
 	iter, err := db.BuildIterator(CursorQuery{
-		start:  NewDBKey(uint32(time.Now().Add(-time.Hour).Unix()), types.BytesToTopic(topic), types.Hash{}).Bytes(),
-		end:    NewDBKey(uint32(time.Now().Add(time.Second).Unix()), types.BytesToTopic(topic), types.Hash{}).Bytes(),
+		start:  NewDBKey(uint32(time.Now().Add(-time.Hour).Unix()), wakutypes.BytesToTopic(topic), types.Hash{}).Bytes(),
+		end:    NewDBKey(uint32(time.Now().Add(time.Second).Unix()), wakutypes.BytesToTopic(topic), types.Hash{}).Bytes(),
 		topics: [][]byte{topic},
 		limit:  10,
 	})
-	topicsMap := make(map[types.TopicType]bool)
-	topicsMap[types.BytesToTopic(topic)] = true
+	topicsMap := make(map[wakutypes.TopicType]bool)
+	topicsMap[wakutypes.BytesToTopic(topic)] = true
 	require.NoError(t, err)
 	hasNext := iter.Next()
 	require.True(t, hasNext)
 	rawValue, err := iter.GetEnvelopeByTopicsMap(topicsMap)
 	require.NoError(t, err)
 	require.NotEmpty(t, rawValue)
-	var receivedEnvelope waku.Envelope
+	var receivedEnvelope wakuv1common.Envelope
 	err = rlp.DecodeBytes(rawValue, &receivedEnvelope)
 	require.NoError(t, err)
-	require.EqualValues(t, waku.BytesToTopic(topic), receivedEnvelope.Topic)
+	require.EqualValues(t, wakuv1common.BytesToTopic(topic), receivedEnvelope.Topic)
 
 	err = iter.Release()
 	require.NoError(t, err)

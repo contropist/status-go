@@ -8,13 +8,13 @@ import (
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/zap"
 
-	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
 	"github.com/status-im/status-go/eth-node/crypto"
-	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/multiaccounts/accounts"
 	"github.com/status-im/status-go/protocol/encryption/multidevice"
 	"github.com/status-im/status-go/protocol/tt"
-	"github.com/status-im/status-go/waku"
+	"github.com/status-im/status-go/wakuv1"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 func TestMessengerSyncKeycardChangeSuite(t *testing.T) {
@@ -29,7 +29,7 @@ type MessengerSyncKeycardChangeSuite struct {
 
 	// If one wants to send messages between different instances of Messenger,
 	// a single Waku service should be shared.
-	shh types.Waku
+	shh wakutypes.Waku
 
 	logger *zap.Logger
 }
@@ -37,10 +37,10 @@ type MessengerSyncKeycardChangeSuite struct {
 func (s *MessengerSyncKeycardChangeSuite) SetupTest() {
 	s.logger = tt.MustCreateTestLogger()
 
-	config := waku.DefaultConfig
+	config := wakuv1.DefaultConfig
 	config.MinimumAcceptedPoW = 0
-	shh := waku.New(&config, s.logger)
-	s.shh = gethbridge.NewGethWakuWrapper(shh)
+	shh := wakuv1.New(&config, s.logger)
+	s.shh = shh
 	s.Require().NoError(shh.Start())
 
 	s.main = s.newMessenger(s.shh)
@@ -58,7 +58,7 @@ func (s *MessengerSyncKeycardChangeSuite) SetupTest() {
 	}
 	err = s.other.SetInstallationMetadata(s.other.installationID, imOther)
 	s.Require().NoError(err)
-	response, err := s.other.SendPairInstallation(context.Background(), nil)
+	response, err := s.other.SendPairInstallation(context.Background(), "", nil)
 	s.Require().NoError(err)
 	s.Require().NotNil(response)
 
@@ -70,7 +70,7 @@ func (s *MessengerSyncKeycardChangeSuite) SetupTest() {
 	)
 	s.Require().NoError(err)
 
-	err = s.main.EnableInstallation(s.other.installationID)
+	_, err = s.main.EnableInstallation(s.other.installationID)
 	s.Require().NoError(err)
 
 	// Pre-condition - both sides have to know about keypairs migrated to a keycards
@@ -111,7 +111,7 @@ func (s *MessengerSyncKeycardChangeSuite) TearDownTest() {
 	TearDownMessenger(&s.Suite, s.main)
 }
 
-func (s *MessengerSyncKeycardChangeSuite) newMessenger(shh types.Waku) *Messenger {
+func (s *MessengerSyncKeycardChangeSuite) newMessenger(shh wakutypes.Waku) *Messenger {
 	privateKey, err := crypto.GenerateKey()
 	s.Require().NoError(err)
 

@@ -14,7 +14,7 @@ from clients.services.wallet import WalletService
 from clients.signals import SignalClient, SignalType
 from clients.status_backend import RpcClient, StatusBackend
 from conftest import option
-from resources.constants import user_1, user_2
+from resources.constants import USE_IPV6, user_1, user_2
 from resources.enums import MessageContentType
 
 
@@ -221,8 +221,8 @@ class MessengerTestCase(NetworkConditionTestCase):
         request.cls.sender = self.sender = self.initialize_backend(self.await_signals, False)
         request.cls.receiver = self.receiver = self.initialize_backend(self.await_signals, False)
 
-    def initialize_backend(self, await_signals, privileged=True, **kwargs):
-        backend = StatusBackend(await_signals, privileged)
+    def initialize_backend(self, await_signals, privileged=True, ipv6=USE_IPV6, **kwargs):
+        backend = StatusBackend(await_signals, privileged=privileged, ipv6=ipv6)
         backend.init_status_backend()
         backend.create_account_and_login(**kwargs)
         backend.find_public_key()

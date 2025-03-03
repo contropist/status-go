@@ -20,7 +20,7 @@ from clients.services.settings import SettingsService
 from clients.signals import SignalClient, SignalType
 from clients.rpc import RpcClient
 from conftest import option
-from resources.constants import user_1, DEFAULT_DISPLAY_NAME, USER_DIR
+from resources.constants import USE_IPV6, user_1, DEFAULT_DISPLAY_NAME, USER_DIR
 from docker.errors import APIError
 
 NANOSECONDS_PER_SECOND = 1_000_000_000
@@ -30,7 +30,11 @@ class StatusBackend(RpcClient, SignalClient):
 
     container = None
 
-    def __init__(self, await_signals=[], privileged=False):
+    def __init__(self, await_signals=[], privileged=False, ipv6=USE_IPV6):
+        self.ipv6 = True if ipv6 == "Yes" else False
+        logging.info(f"Flag USE_IPV6 is: {self.ipv6}")
+        self.docker_project_name = option.docker_project_name
+        self.network_name = f"{self.docker_project_name}_default"
         if option.status_backend_url:
             url = option.status_backend_url
         else:
@@ -42,7 +46,7 @@ class StatusBackend(RpcClient, SignalClient):
                     host_port = random.choice(option.status_backend_port_range)
                     ports_tried.append(host_port)
                     self.container = self._start_container(host_port, privileged)
-                    url = f"http://127.0.0.1:{host_port}"
+                    url = f"http://{'[::1]' if self.ipv6 else '127.0.0.1'}:{host_port}"
                     option.status_backend_port_range.remove(host_port)
                     break
                 except Exception as ex:
@@ -71,11 +75,9 @@ class StatusBackend(RpcClient, SignalClient):
         self.settings_service = SettingsService(self)
 
     def _start_container(self, host_port, privileged):
-        docker_project_name = option.docker_project_name
-
         identifier = os.environ.get("BUILD_ID") if os.environ.get("CI") else os.popen("git rev-parse --short HEAD").read().strip()
-        image_name = f"{docker_project_name}-status-backend:latest"
-        container_name = f"{docker_project_name}-{identifier}-status-backend-{host_port}"
+        image_name = f"{self.docker_project_name}-status-backend:latest"
+        container_name = f"{self.docker_project_name}-{identifier}-status-backend-{host_port}"
 
         coverage_path = option.codecov_dir if option.codecov_dir else os.path.abspath("./coverage/binary")
 
@@ -84,12 +86,8 @@ class StatusBackend(RpcClient, SignalClient):
             "detach": True,
             "privileged": privileged,
             "name": container_name,
-            "labels": {"com.docker.compose.project": docker_project_name},
-            "entrypoint": [
-                "status-backend",
-                "--address",
-                "0.0.0.0:3333",
-            ],
+            "labels": {"com.docker.compose.project": self.docker_project_name},
+            "entrypoint": ["status-backend", "--address", "0.0.0.0:3333"],
             "ports": {"3333/tcp": host_port},
             "environment": {
                 "GOCOVERDIR": "/coverage/binary",
@@ -101,12 +99,25 @@ class StatusBackend(RpcClient, SignalClient):
                 }
             },
         }
+
+        if self.ipv6:
+            container_args.update(
+                {
+                    "entrypoint": ["status-backend", "--address", f"[::]:{host_port}"],
+                    "ports": {
+                        f"{host_port}/tcp": [
+                            {"HostIp": "::", "HostPort": str(host_port)},
+                        ]
+                    },
+                }
+            )
+
         if "FUNCTIONAL_TESTS_DOCKER_UID" in os.environ:
             container_args["user"] = os.environ["FUNCTIONAL_TESTS_DOCKER_UID"]
 
         container = self.docker_client.containers.run(**container_args)
 
-        network = self.docker_client.networks.get(f"{docker_project_name}_default")
+        network = self.docker_client.networks.get(self.network_name)
         network.connect(container)
 
         option.status_backend_containers.append(self)
@@ -116,10 +127,11 @@ class StatusBackend(RpcClient, SignalClient):
         start_time = time.time()
         while time.time() - start_time <= timeout:
             try:
-                self.health(enable_logging=False)
+                self.health(enable_logging=True)
                 logging.info(f"StatusBackend is healthy after {time.time() - start_time} seconds")
                 return
-            except Exception:
+            except Exception as ex:
+                logging.error(ex)
                 time.sleep(0.1)
         raise TimeoutError(f"StatusBackend was not healthy after {timeout} seconds")
 
@@ -322,18 +334,59 @@ class StatusBackend(RpcClient, SignalClient):
         self.public_key = self.node_login_event.get("event", {}).get("settings", {}).get("public-key")
 
     @retry(stop=stop_after_delay(10), wait=wait_fixed(0.1), reraise=True)
-    def change_container_ip(self, new_ip=None):
+    def change_container_ip(self, new_ipv4=None, new_ipv6=None):
         if not self.container:
             raise RuntimeError("Container is not initialized.")
-        logging.info(f"Trying to change container {self.container.name} IP")
-        if not new_ip:
-            new_ip = f"172.11.0.{random.randint(2, 254)}"
-        docker_project_name = option.docker_project_name
-        network_name = f"{docker_project_name}_default"
+
+        logging.info(f"Trying to change container {self.container.name} IPs (IPv6 Mode: {self.ipv6})")
+
         try:
-            network = self.docker_client.networks.get(network_name)
+            # Get the network details
+            network = self.docker_client.networks.get(self.network_name)
+
+            # Ensure network has explicitly configured subnets
+            ipam_config = network.attrs.get("IPAM", {}).get("Config", [])
+            if not ipam_config:
+                raise RuntimeError("Network does not have a user-defined subnet, cannot assign a custom IP.")
+
+            self.container.reload()
+            container_info = self.container.attrs["NetworkSettings"]["Networks"].get(self.network_name, {})
+            current_ipv4 = container_info.get("IPAddress", "Unknown")
+            current_ipv6 = container_info.get("GlobalIPv6Address", "Unknown")
+
+            logging.info(f"Current IPs for {self.container.name} - IPv4: {current_ipv4}, IPv6: {current_ipv6}")
+
+            # Generate new IPs based on mode
+            for config in ipam_config:
+                subnet = config.get("Subnet")
+
+                if self.ipv6 and ":" in subnet and not new_ipv6:  # IPv6 Subnet
+                    base_ipv6 = subnet.rstrip("::/64")
+                    new_ipv6 = f"{base_ipv6}::{random.randint(1, 9999):x}:{random.randint(1, 9999):x}"
+                    logging.info(f"Generated new IPv6: {new_ipv6}")
+
+                elif not self.ipv6 and "." in subnet and not new_ipv4:  # IPv4 Subnet
+                    new_ipv4 = subnet.rsplit(".", 1)[0] + f".{random.randint(2, 254)}"
+                    logging.info(f"Generated new IPv4: {new_ipv4}")
+
+            # Disconnect and reconnect with only the needed IP type
             network.disconnect(self.container)
-            network.connect(self.container, ipv4_address=new_ip)
-            logging.info(f"Changed container {self.container.name} IP to {new_ip}")
+            if self.ipv6:
+                network.connect(self.container, ipv6_address=new_ipv6)
+            else:
+                network.connect(self.container, ipv4_address=new_ipv4)
+
+            self.container.reload()
+            updated_info = self.container.attrs["NetworkSettings"]["Networks"].get(self.network_name, {})
+            updated_ipv4 = updated_info.get("IPAddress", "Unknown")
+            updated_ipv6 = updated_info.get("GlobalIPv6Address", "Unknown")
+
+            if self.ipv6 and current_ipv6 == updated_ipv6:
+                raise RuntimeError("IPV6 is the same after network reconnect")
+            if not self.ipv6 and current_ipv4 == updated_ipv4:
+                raise RuntimeError("IPV4 is the same after network reconnect")
+
+            logging.info(f"Changed container {self.container.name} IPs - New IPv4: {updated_ipv4}, New IPv6: {updated_ipv6}")
+
         except Exception as e:
             raise RuntimeError(f"Failed to change container IP: {e}")

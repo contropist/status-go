@@ -11,7 +11,8 @@ from resources.constants import USE_IPV6
 class TestCommunityMessages(MessengerTestCase):
 
     def test_community_messages_baseline(self, message_count=1, network_condition=None):
-        message_chat_id = self.create_and_join_community()
+        self.create_community(self.sender)
+        message_chat_id = self.join_community(self.receiver)
         if network_condition:
             network_condition(self.receiver)
         self.community_messages(message_chat_id, message_count)
@@ -29,7 +30,8 @@ class TestCommunityMessages(MessengerTestCase):
         self.test_community_messages_baseline(network_condition=self.add_low_bandwith)
 
     def test_community_messages_with_node_pause_30_seconds(self):
-        message_chat_id = self.create_and_join_community()
+        self.create_community(self.sender)
+        message_chat_id = self.join_community(self.receiver)
 
         with self.node_pause(self.receiver):
             message_text = f"test_message_{uuid4()}"
@@ -39,7 +41,8 @@ class TestCommunityMessages(MessengerTestCase):
 
     @pytest.mark.skipif(USE_IPV6 == "Yes", reason="Test works only with IPV4")
     def test_community_messages_with_ip_change(self):
-        message_chat_id = self.create_and_join_community()
+        self.create_community(self.sender)
+        message_chat_id = self.join_community(self.receiver)
 
         self.community_messages(message_chat_id, 1)
         self.receiver.change_container_ip()

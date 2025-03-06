@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+	"go.uber.org/zap"
 
 	// Import postgres driver
 	_ "github.com/lib/pq"
@@ -14,13 +15,16 @@ import (
 	"github.com/status-im/migrate/v4/database/postgres"
 	bindata "github.com/status-im/migrate/v4/source/go_bindata"
 
+	"github.com/status-im/status-go/common"
+	"github.com/status-im/status-go/logutils"
 	"github.com/status-im/status-go/mailserver/migrations"
 
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/status-im/status-go/eth-node/types"
-	waku "github.com/status-im/status-go/waku/common"
+	wakuv1common "github.com/status-im/status-go/wakuv1/common"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 type PostgresDB struct {
@@ -52,6 +56,7 @@ func NewPostgresDB(uri string) (*PostgresDB, error) {
 	instance.updateArchivedEnvelopesCount()
 	// checking count on every insert is inefficient
 	go func() {
+		defer common.LogOnPanic()
 		for {
 			select {
 			case <-instance.done:
@@ -82,7 +87,7 @@ func (i *PostgresDB) envelopesCount() (int, error) {
 
 func (i *PostgresDB) updateArchivedEnvelopesCount() {
 	if count, err := i.envelopesCount(); err != nil {
-		log.Warn("db query for envelopes count failed", "err", err)
+		logutils.ZapLogger().Warn("db query for envelopes count failed", zap.Error(err))
 	} else {
 		archivedEnvelopesGauge.WithLabelValues(i.name).Set(float64(count))
 	}
@@ -115,7 +120,7 @@ func (i *postgresIterator) GetEnvelopeByBloomFilter(bloom []byte) ([]byte, error
 	return value, nil
 }
 
-func (i *postgresIterator) GetEnvelopeByTopicsMap(topics map[types.TopicType]bool) ([]byte, error) {
+func (i *postgresIterator) GetEnvelopeByTopicsMap(topics map[wakutypes.TopicType]bool) ([]byte, error) {
 	var value []byte
 	var id []byte
 	if err := i.Scan(&id, &value); err != nil {
@@ -233,7 +238,7 @@ func (i *PostgresDB) GetEnvelope(key *DBKey) ([]byte, error) {
 
 func (i *PostgresDB) Prune(t time.Time, batch int) (int, error) {
 	var zero types.Hash
-	var emptyTopic types.TopicType
+	var emptyTopic wakutypes.TopicType
 	kl := NewDBKey(0, emptyTopic, zero)
 	ku := NewDBKey(uint32(t.Unix()), emptyTopic, zero)
 	statement := "DELETE FROM envelopes WHERE id BETWEEN $1 AND $2"
@@ -255,12 +260,12 @@ func (i *PostgresDB) Prune(t time.Time, batch int) (int, error) {
 	return int(rows), nil
 }
 
-func (i *PostgresDB) SaveEnvelope(env types.Envelope) error {
+func (i *PostgresDB) SaveEnvelope(env wakutypes.Envelope) error {
 	topic := env.Topic()
 	key := NewDBKey(env.Expiry()-env.TTL(), topic, env.Hash())
 	rawEnvelope, err := rlp.EncodeToBytes(env.Unwrap())
 	if err != nil {
-		log.Error(fmt.Sprintf("rlp.EncodeToBytes failed: %s", err))
+		logutils.ZapLogger().Error("rlp.EncodeToBytes failed", zap.Error(err))
 		archivedErrorsCounter.WithLabelValues(i.name).Inc()
 		return err
 	}
@@ -291,12 +296,12 @@ func (i *PostgresDB) SaveEnvelope(env types.Envelope) error {
 
 	archivedEnvelopesGauge.WithLabelValues(i.name).Inc()
 	archivedEnvelopeSizeMeter.WithLabelValues(i.name).Observe(
-		float64(waku.EnvelopeHeaderLength + env.Size()))
+		float64(wakuv1common.EnvelopeHeaderLength + env.Size()))
 
 	return nil
 }
 
-func topicToByte(t types.TopicType) []byte {
+func topicToByte(t wakutypes.TopicType) []byte {
 	return []byte{t[0], t[1], t[2], t[3]}
 }
 

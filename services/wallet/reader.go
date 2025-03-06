@@ -1,5 +1,7 @@
 package wallet
 
+//go:generate mockgen -package=mock_reader -source=reader.go -destination=mock/reader/reader.go
+
 import (
 	"context"
 	"math"
@@ -7,16 +9,16 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
 	"golang.org/x/exp/maps"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/event"
-	"github.com/ethereum/go-ethereum/log"
+	gocommon "github.com/status-im/status-go/common"
+	"github.com/status-im/status-go/logutils"
 	"github.com/status-im/status-go/rpc/chain"
-	"github.com/status-im/status-go/services/wallet/async"
 	"github.com/status-im/status-go/services/wallet/market"
-	"github.com/status-im/status-go/services/wallet/thirdparty"
 	"github.com/status-im/status-go/services/wallet/token"
 	"github.com/status-im/status-go/services/wallet/transfer"
 	"github.com/status-im/status-go/services/wallet/walletevent"
@@ -32,10 +34,6 @@ const (
 	activityReloadMarginSeconds = 30 // Trigger a wallet reload if activity is detected this many seconds before the last reload
 )
 
-func getFixedCurrencies() []string {
-	return []string{"USD"}
-}
-
 func belongsToMandatoryTokens(symbol string) bool {
 	var mandatoryTokens = []string{"ETH", "DAI", "SNT", "STT"}
 	for _, t := range mandatoryTokens {
@@ -44,6 +42,16 @@ func belongsToMandatoryTokens(symbol string) bool {
 		}
 	}
 	return false
+}
+
+type ReaderInterface interface {
+	Start() error
+	Stop()
+	Restart() error
+	FetchOrGetCachedWalletBalances(ctx context.Context, clients map[uint64]chain.ClientInterface, addresses []common.Address, forceRefresh bool) (map[common.Address][]token.StorageToken, error)
+	FetchBalances(ctx context.Context, clients map[uint64]chain.ClientInterface, addresses []common.Address) (map[common.Address][]token.StorageToken, error)
+	GetCachedBalances(clients map[uint64]chain.ClientInterface, addresses []common.Address) (map[common.Address][]token.StorageToken, error)
+	GetLastTokenUpdateTimestamps() map[common.Address]int64
 }
 
 func NewReader(tokenManager token.ManagerInterface, marketManager *market.Manager, persistence token.TokenBalancesStorage, walletFeed *event.Feed) *Reader {
@@ -117,6 +125,7 @@ func (r *Reader) Start() error {
 	r.startWalletEventsWatcher()
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		ticker := time.NewTicker(walletTickReloadPeriod)
 		defer ticker.Stop()
 		for {
@@ -267,7 +276,7 @@ func (r *Reader) FetchOrGetCachedWalletBalances(ctx context.Context, clients map
 	if needFetch {
 		_, err := r.FetchBalances(ctx, clients, addresses)
 		if err != nil {
-			log.Error("FetchOrGetCachedWalletBalances error", "err", err)
+			logutils.ZapLogger().Error("FetchOrGetCachedWalletBalances error", zap.Error(err))
 		}
 	}
 
@@ -332,7 +341,7 @@ func tokensToBalancesPerChain(cachedTokens map[common.Address][]token.StorageTok
 func (r *Reader) fetchBalances(ctx context.Context, clients map[uint64]chain.ClientInterface, addresses []common.Address, tokenAddresses []common.Address) (map[uint64]map[common.Address]map[common.Address]*hexutil.Big, error) {
 	latestBalances, err := r.tokenManager.GetBalancesByChain(ctx, clients, addresses, tokenAddresses)
 	if err != nil {
-		log.Error("tokenManager.GetBalancesByChain error", "err", err)
+		logutils.ZapLogger().Error("tokenManager.GetBalancesByChain error", zap.Error(err))
 		return nil, err
 	}
 
@@ -379,7 +388,7 @@ func toChainBalance(
 func (r *Reader) getBalance1DayAgo(balance *token.ChainBalance, dayAgoTimestamp int64, symbol string, address common.Address) (*big.Int, error) {
 	balance1DayAgo, err := r.tokenManager.GetTokenHistoricalBalance(address, balance.ChainID, symbol, dayAgoTimestamp)
 	if err != nil {
-		log.Error("tokenManager.GetTokenHistoricalBalance error", "err", err)
+		logutils.ZapLogger().Error("tokenManager.GetTokenHistoricalBalance error", zap.Error(err))
 		return nil, err
 	}
 
@@ -460,98 +469,20 @@ func (r *Reader) createBalancePerChainPerSymbol(
 	return balancesPerChain
 }
 
-func (r *Reader) GetWalletToken(ctx context.Context, clients map[uint64]chain.ClientInterface, addresses []common.Address, currency string) (map[common.Address][]token.StorageToken, error) {
-	currencies := make([]string, 0)
-	currencies = append(currencies, currency)
-	currencies = append(currencies, getFixedCurrencies()...)
+// GetLastTokenUpdateTimestamps returns last timestamps of successful token updates
+func (r *Reader) GetLastTokenUpdateTimestamps() map[common.Address]int64 {
+	result := make(map[common.Address]int64)
 
-	result, err := r.FetchOrGetCachedWalletBalances(ctx, clients, addresses, true)
-	if err != nil {
-		return nil, err
-	}
-
-	tokenSymbols := make([]string, 0)
-	for _, storageTokens := range result {
-		for _, t := range storageTokens {
-			tokenSymbols = append(tokenSymbols, t.Token.Symbol)
+	r.lastWalletTokenUpdateTimestamp.Range(func(key, value interface{}) bool {
+		addr, ok1 := key.(common.Address)
+		timestamp, ok2 := value.(int64)
+		if ok1 && ok2 {
+			result[addr] = timestamp
 		}
-	}
-
-	var (
-		group             = async.NewAtomicGroup(ctx)
-		prices            = map[string]map[string]float64{}
-		tokenDetails      = map[string]thirdparty.TokenDetails{}
-		tokenMarketValues = map[string]thirdparty.TokenMarketValues{}
-	)
-
-	group.Add(func(parent context.Context) error {
-		prices, err = r.marketManager.FetchPrices(tokenSymbols, currencies)
-		if err != nil {
-			log.Info("marketManager.FetchPrices err", err)
-		}
-		return nil
+		return true
 	})
 
-	group.Add(func(parent context.Context) error {
-		tokenDetails, err = r.marketManager.FetchTokenDetails(tokenSymbols)
-		if err != nil {
-			log.Info("marketManager.FetchTokenDetails err", err)
-		}
-		return nil
-	})
-
-	group.Add(func(parent context.Context) error {
-		tokenMarketValues, err = r.marketManager.FetchTokenMarketValues(tokenSymbols, currency)
-		if err != nil {
-			log.Info("marketManager.FetchTokenMarketValues err", err)
-		}
-		return nil
-	})
-
-	select {
-	case <-group.WaitAsync():
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	err = group.Error()
-	if err != nil {
-		return nil, err
-	}
-
-	for address, tokens := range result {
-		for index, tok := range tokens {
-			marketValuesPerCurrency := make(map[string]token.TokenMarketValues)
-			for _, currency := range currencies {
-				if _, ok := tokenMarketValues[tok.Symbol]; !ok {
-					continue
-				}
-				marketValuesPerCurrency[currency] = token.TokenMarketValues{
-					MarketCap:       tokenMarketValues[tok.Symbol].MKTCAP,
-					HighDay:         tokenMarketValues[tok.Symbol].HIGHDAY,
-					LowDay:          tokenMarketValues[tok.Symbol].LOWDAY,
-					ChangePctHour:   tokenMarketValues[tok.Symbol].CHANGEPCTHOUR,
-					ChangePctDay:    tokenMarketValues[tok.Symbol].CHANGEPCTDAY,
-					ChangePct24hour: tokenMarketValues[tok.Symbol].CHANGEPCT24HOUR,
-					Change24hour:    tokenMarketValues[tok.Symbol].CHANGE24HOUR,
-					Price:           prices[tok.Symbol][currency],
-					HasError:        !r.marketManager.IsConnected,
-				}
-			}
-
-			if _, ok := tokenDetails[tok.Symbol]; !ok {
-				continue
-			}
-
-			result[address][index].Description = tokenDetails[tok.Symbol].Description
-			result[address][index].AssetWebsiteURL = tokenDetails[tok.Symbol].AssetWebsiteURL
-			result[address][index].BuiltOn = tokenDetails[tok.Symbol].BuiltOn
-			result[address][index].MarketValuesPerCurrency = marketValuesPerCurrency
-		}
-	}
-
-	r.updateTokenUpdateTimestamp(addresses)
-
-	return result, r.persistence.SaveTokens(result)
+	return result
 }
 
 func isCachedToken(cachedTokens map[common.Address][]token.StorageToken, address common.Address, symbol string, chainID uint64) bool {
@@ -596,7 +527,7 @@ func (r *Reader) FetchBalances(ctx context.Context, clients map[uint64]chain.Cli
 	tokenAddresses := getTokenAddresses(allTokens)
 	balances, err := r.fetchBalances(ctx, clients, addresses, tokenAddresses)
 	if err != nil {
-		log.Error("failed to update balances", "err", err)
+		logutils.ZapLogger().Error("failed to update balances", zap.Error(err))
 		return nil, err
 	}
 
@@ -609,7 +540,7 @@ func (r *Reader) FetchBalances(ctx context.Context, clients map[uint64]chain.Cli
 
 	err = r.persistence.SaveTokens(tokens)
 	if err != nil {
-		log.Error("failed to save tokens", "err", err) // Do not return error, as it is not critical
+		logutils.ZapLogger().Error("failed to save tokens", zap.Error(err)) // Do not return error, as it is not critical
 	}
 
 	r.updateTokenUpdateTimestamp(addresses)

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -1060,4 +1060,29 @@ func TestFetchOrGetCachedWalletBalances(t *testing.T) {
 
 	_, err := reader.FetchOrGetCachedWalletBalances(context.TODO(), clients, addresses, false)
 	require.Error(t, err)
+}
+
+// TestGetLastTokenUpdateTimestamps tests the GetLastTokenUpdateTimestamps method.
+func TestGetLastTokenUpdateTimestamps(t *testing.T) {
+	// Setup the Reader and mock dependencies.
+	reader, _, _, mockCtrl := setupReader(t)
+	defer mockCtrl.Finish()
+
+	// Define test addresses and specific timestamps.
+	address1 := testAccAddress1
+	address2 := testAccAddress2
+	timestamp1 := time.Now().Add(-1 * time.Hour).Unix()
+	timestamp2 := time.Now().Add(-2 * time.Hour).Unix()
+
+	// Store valid timestamps in the Reader's sync.Map.
+	reader.lastWalletTokenUpdateTimestamp.Store(address1, timestamp1)
+	reader.lastWalletTokenUpdateTimestamp.Store(address2, timestamp2)
+
+	// Call the method to retrieve timestamps.
+	timestamps := reader.GetLastTokenUpdateTimestamps()
+	require.Len(t, timestamps, 2, "Expected two timestamps in the result map")
+
+	// Verify that the retrieved timestamps match the stored values.
+	assert.Equal(t, timestamp1, timestamps[address1], "Timestamp for address1 does not match")
+	assert.Equal(t, timestamp2, timestamps[address2], "Timestamp for address2 does not match")
 }

@@ -14,6 +14,29 @@ import (
 const allFieldsForTableActivityCenterNotification = `id, timestamp, notification_type, chat_id, read, dismissed, accepted, message, author,
     reply_message, community_id, membership_status, contact_verification_status, token_data, deleted, updated_at`
 
+const selectActivityCenterNotificationsQuery = `SELECT
+			a.id,
+			a.timestamp,
+			a.notification_type,
+			a.chat_id,
+			a.community_id,
+			a.membership_status,
+			a.read,
+			a.accepted,
+			a.dismissed,
+			a.deleted,
+			a.message,
+			c.last_message,
+			a.reply_message,
+			a.contact_verification_status,
+			c.name,
+			a.author,
+			a.token_data,
+			a.updated_at,
+			a.installation_id
+		FROM activity_center_notifications a
+		LEFT JOIN chats c ON c.id = a.chat_id `
+
 var emptyNotifications = make([]*ActivityCenterNotification, 0)
 
 func (db sqlitePersistence) DeleteActivityCenterNotificationByID(id []byte, updatedAt uint64) error {
@@ -60,10 +83,6 @@ func (db sqlitePersistence) DeleteActivityCenterNotificationForMessage(chatID st
 	}
 
 	for _, notification := range notifications {
-		if notification.LastMessage != nil && notification.LastMessage.ID == messageID {
-			withNotification(notification)
-		}
-
 		if notification.Message != nil && notification.Message.ID == messageID {
 			withNotification(notification)
 		}
@@ -152,9 +171,10 @@ func (db sqlitePersistence) SaveActivityCenterNotification(notification *Activit
 			dismissed,
 			token_data,
 			deleted,
-		    updated_at
+		    updated_at,
+			installation_id
 		)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		`,
 		notification.ID,
 		notification.Timestamp,
@@ -172,6 +192,7 @@ func (db sqlitePersistence) SaveActivityCenterNotification(notification *Activit
 		encodedTokenData,
 		notification.Deleted,
 		notification.UpdatedAt,
+		notification.InstallationID,
 	)
 	if err != nil {
 		return 0, err
@@ -273,6 +294,7 @@ func (db sqlitePersistence) unmarshalActivityCenterNotificationRow(row *sql.Row)
 	var tokenDataBytes []byte
 	var name sql.NullString
 	var author sql.NullString
+	var installationID sql.NullString
 	notification := &ActivityCenterNotification{}
 	err := row.Scan(
 		&notification.ID,
@@ -292,7 +314,9 @@ func (db sqlitePersistence) unmarshalActivityCenterNotificationRow(row *sql.Row)
 		&name,
 		&author,
 		&tokenDataBytes,
-		&notification.UpdatedAt)
+		&notification.UpdatedAt,
+		&installationID,
+	)
 
 	if err != nil {
 		return nil, err
@@ -312,6 +336,10 @@ func (db sqlitePersistence) unmarshalActivityCenterNotificationRow(row *sql.Row)
 
 	if author.Valid {
 		notification.Author = author.String
+	}
+
+	if installationID.Valid {
+		notification.InstallationID = installationID.String
 	}
 
 	if len(tokenDataBytes) > 0 {
@@ -363,6 +391,7 @@ func (db sqlitePersistence) unmarshalActivityCenterNotificationRows(rows *sql.Ro
 		var tokenDataBytes []byte
 		var name sql.NullString
 		var author sql.NullString
+		var installationID sql.NullString
 		notification := &ActivityCenterNotification{}
 		err := rows.Scan(
 			&notification.ID,
@@ -382,7 +411,9 @@ func (db sqlitePersistence) unmarshalActivityCenterNotificationRows(rows *sql.Ro
 			&author,
 			&tokenDataBytes,
 			&latestCursor,
-			&notification.UpdatedAt)
+			&notification.UpdatedAt,
+			&installationID,
+		)
 		if err != nil {
 			return "", nil, err
 		}
@@ -401,6 +432,10 @@ func (db sqlitePersistence) unmarshalActivityCenterNotificationRows(rows *sql.Ro
 
 		if author.Valid {
 			notification.Author = author.String
+		}
+
+		if installationID.Valid {
+			notification.InstallationID = installationID.String
 		}
 
 		if len(tokenDataBytes) > 0 {
@@ -543,7 +578,8 @@ func (db sqlitePersistence) buildActivityCenterQuery(tx *sql.Tx, params activity
 	a.author,
 	a.token_data,
 	substr('0000000000000000000000000000000000000000000000000000000000000000' || a.timestamp, -64, 64) || hex(a.id) as cursor,
-	a.updated_at
+	a.updated_at,
+	a.installation_id
 	FROM activity_center_notifications a
 	LEFT JOIN chats c
 	ON
@@ -664,7 +700,8 @@ func (db sqlitePersistence) GetActivityCenterNotificationsByID(ids []types.HexBy
 		a.author,
 		a.token_data,
 		substr('0000000000000000000000000000000000000000000000000000000000000000' || a.timestamp, -64, 64) || hex(a.id) as cursor,
-		a.updated_at
+		a.updated_at,
+		a.installation_id
 		FROM activity_center_notifications a
 		LEFT JOIN chats c
 		ON
@@ -683,33 +720,33 @@ func (db sqlitePersistence) GetActivityCenterNotificationsByID(ids []types.HexBy
 	return notifications, nil
 }
 
+func (db sqlitePersistence) GetActivityCenterNotificationByTypeAuthorAndChatID(acType ActivityCenterType, author string, chatID string) (*ActivityCenterNotification, error) {
+	if len(author) == 0 {
+		return nil, nil
+	}
+	if len(chatID) == 0 {
+		return nil, nil
+	}
+	// nolint: gosec
+	query := selectActivityCenterNotificationsQuery + `
+		WHERE a.notification_type = ?
+			AND a.author = ?
+			AND a.chat_id = ?
+		ORDER BY a.timestamp DESC
+		LIMIT 1`
+
+	row := db.db.QueryRow(query, acType, author, chatID)
+	notification, err := db.unmarshalActivityCenterNotificationRow(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return notification, err
+}
+
 // GetActivityCenterNotificationByID returns a notification by its ID even it's deleted logically
 func (db sqlitePersistence) GetActivityCenterNotificationByID(id types.HexBytes) (*ActivityCenterNotification, error) {
-	row := db.db.QueryRow(`
-		SELECT
-		a.id,
-		a.timestamp,
-		a.notification_type,
-		a.chat_id,
-		a.community_id,
-		a.membership_status,
-		a.read,
-		a.accepted,
-		a.dismissed,
-		a.deleted,
-		a.message,
-		c.last_message,
-		a.reply_message,
-		a.contact_verification_status,
-		c.name,
-		a.author,
-		a.token_data,
-		a.updated_at
-		FROM activity_center_notifications a
-		LEFT JOIN chats c
-		ON
-		c.id = a.chat_id
-		WHERE a.id = ?`, id)
+	query := selectActivityCenterNotificationsQuery + `WHERE a.id = ?`
+	row := db.db.QueryRow(query, id)
 
 	notification, err := db.unmarshalActivityCenterNotificationRow(row)
 	if err == sql.ErrNoRows {
@@ -1319,28 +1356,7 @@ func (db sqlitePersistence) ActiveContactRequestNotification(contactID string) (
 	// contact request per contact, but to avoid relying on the unpredictable
 	// behavior of the DB engine for sorting, we sort by notification.Timestamp
 	// DESC.
-	query := `
-		SELECT
-			a.id,
-			a.timestamp,
-			a.notification_type,
-			a.chat_id,
-			a.community_id,
-			a.membership_status,
-			a.read,
-			a.accepted,
-			a.dismissed,
-			a.deleted,
-			a.message,
-			c.last_message,
-			a.reply_message,
-			a.contact_verification_status,
-			c.name,
-			a.author,
-			a.token_data,
-			a.updated_at
-		FROM activity_center_notifications a
-		LEFT JOIN chats c ON c.id = a.chat_id
+	query := selectActivityCenterNotificationsQuery + `
 		WHERE a.author = ?
 		    AND NOT a.deleted
 			AND NOT a.dismissed

@@ -8,12 +8,12 @@ import (
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/zap"
 
-	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
-	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/protocol/common"
 	"github.com/status-im/status-go/protocol/communities"
 	"github.com/status-im/status-go/protocol/protobuf"
 	"github.com/status-im/status-go/protocol/tt"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 func TestMessengerRawMessageResendTestSuite(t *testing.T) {
@@ -27,8 +27,8 @@ type MessengerRawMessageResendTest struct {
 	aliceMessenger *Messenger
 	bobMessenger   *Messenger
 
-	aliceWaku types.Waku
-	bobWaku   types.Waku
+	aliceWaku wakutypes.Waku
+	bobWaku   wakutypes.Waku
 
 	mockedBalances communities.BalancesByChain
 }
@@ -76,10 +76,10 @@ func (s *MessengerRawMessageResendTest) TearDownTest() {
 	TearDownMessenger(&s.Suite, s.aliceMessenger)
 	TearDownMessenger(&s.Suite, s.bobMessenger)
 	if s.aliceWaku != nil {
-		s.Require().NoError(gethbridge.GetGethWakuV2From(s.aliceWaku).Stop())
+		s.Require().NoError(s.aliceWaku.Stop())
 	}
 	if s.bobWaku != nil {
-		s.Require().NoError(gethbridge.GetGethWakuV2From(s.bobWaku).Stop())
+		s.Require().NoError(s.bobWaku.Stop())
 	}
 	_ = s.logger.Sync()
 }
@@ -101,22 +101,20 @@ func (s *MessengerRawMessageResendTest) waitForMessageSent(messageID string) {
 func (s *MessengerRawMessageResendTest) TestMessageSent() {
 	ids, err := s.bobMessenger.RawMessagesIDsByType(protobuf.ApplicationMetadataMessage_COMMUNITY_REQUEST_TO_JOIN)
 	s.Require().NoError(err)
-	// one request to join to control node and another to privileged member
-	s.Require().Len(ids, 2)
+	// one request to join to control node
+	s.Require().Len(ids, 1)
 
 	s.waitForMessageSent(ids[0])
-	s.waitForMessageSent(ids[1])
 }
 
 // TestMessageResend tests if ApplicationMetadataMessage_COMMUNITY_REQUEST_TO_JOIN is resent
 func (s *MessengerRawMessageResendTest) TestMessageResend() {
 	ids, err := s.bobMessenger.RawMessagesIDsByType(protobuf.ApplicationMetadataMessage_COMMUNITY_REQUEST_TO_JOIN)
 	s.Require().NoError(err)
-	s.Require().Len(ids, 2)
+	s.Require().Len(ids, 1)
 	// wait for Sent status for already sent message to make sure that sent message was delivered
 	// before testing resend
 	s.waitForMessageSent(ids[0])
-	s.waitForMessageSent(ids[1])
 
 	rawMessage := s.GetRequestToJoinToControlNodeRawMessage(ids)
 	s.Require().NotNil(rawMessage)
@@ -145,10 +143,9 @@ func (s *MessengerRawMessageResendTest) TestMessageResend() {
 func (s *MessengerRawMessageResendTest) TestInvalidRawMessageToWatchDoesNotProduceResendLoop() {
 	ids, err := s.bobMessenger.RawMessagesIDsByType(protobuf.ApplicationMetadataMessage_COMMUNITY_REQUEST_TO_JOIN)
 	s.Require().NoError(err)
-	s.Require().Len(ids, 2)
+	s.Require().Len(ids, 1)
 
 	s.waitForMessageSent(ids[0])
-	s.waitForMessageSent(ids[1])
 
 	rawMessage := s.GetRequestToJoinToControlNodeRawMessage(ids)
 	s.Require().NotNil(rawMessage)

@@ -26,16 +26,18 @@ import (
 	"time"
 
 	prom "github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/zap"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rlp"
-	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
+	gocommon "github.com/status-im/status-go/common"
 	"github.com/status-im/status-go/eth-node/crypto"
 	"github.com/status-im/status-go/eth-node/types"
+	"github.com/status-im/status-go/logutils"
 	"github.com/status-im/status-go/params"
-	"github.com/status-im/status-go/waku"
-	wakucommon "github.com/status-im/status-go/waku/common"
+	wakutypes "github.com/status-im/status-go/waku/types"
+	"github.com/status-im/status-go/wakuv1"
+	wakuv1common "github.com/status-im/status-go/wakuv1/common"
 )
 
 const (
@@ -81,14 +83,14 @@ type Config struct {
 
 type WakuMailServer struct {
 	ms            *mailServer
-	shh           *waku.Waku
+	shh           *wakuv1.Waku
 	minRequestPoW float64
 
-	symFilter  *wakucommon.Filter
-	asymFilter *wakucommon.Filter
+	symFilter  *wakuv1common.Filter
+	asymFilter *wakuv1common.Filter
 }
 
-func (s *WakuMailServer) Init(waku *waku.Waku, cfg *params.WakuConfig) error {
+func (s *WakuMailServer) Init(waku *wakuv1.Waku, cfg *params.WakuConfig) error {
 	s.shh = waku
 	s.minRequestPoW = cfg.MinimumPoW
 
@@ -122,11 +124,11 @@ func (s *WakuMailServer) Close() {
 	s.ms.Close()
 }
 
-func (s *WakuMailServer) Archive(env *wakucommon.Envelope) {
-	s.ms.Archive(gethbridge.NewWakuEnvelope(env))
+func (s *WakuMailServer) Archive(env *wakuv1common.Envelope) {
+	s.ms.Archive(wakuv1.NewWakuEnvelope(env))
 }
 
-func (s *WakuMailServer) Deliver(peerID []byte, req wakucommon.MessagesRequest) {
+func (s *WakuMailServer) Deliver(peerID []byte, req wakuv1common.MessagesRequest) {
 	s.ms.DeliverMail(types.BytesToHash(peerID), types.BytesToHash(req.ID), MessagesRequestPayload{
 		Lower:  req.From,
 		Upper:  req.To,
@@ -139,15 +141,15 @@ func (s *WakuMailServer) Deliver(peerID []byte, req wakucommon.MessagesRequest) 
 }
 
 // DEPRECATED; user Deliver instead
-func (s *WakuMailServer) DeliverMail(peerID []byte, req *wakucommon.Envelope) {
+func (s *WakuMailServer) DeliverMail(peerID []byte, req *wakuv1common.Envelope) {
 	payload, err := s.decodeRequest(peerID, req)
 	if err != nil {
 		deliveryFailuresCounter.WithLabelValues("validation").Inc()
-		log.Error(
+		logutils.ZapLogger().Error(
 			"[mailserver:DeliverMail] request failed validaton",
-			"peerID", types.BytesToHash(peerID),
-			"requestID", req.Hash().String(),
-			"err", err,
+			zap.Stringer("peerID", types.BytesToHash(peerID)),
+			zap.Stringer("requestID", req.Hash()),
+			zap.Error(err),
 		)
 		s.ms.sendHistoricMessageErrorResponse(types.BytesToHash(peerID), types.Hash(req.Hash()), err)
 		return
@@ -158,21 +160,21 @@ func (s *WakuMailServer) DeliverMail(peerID []byte, req *wakucommon.Envelope) {
 
 // bloomFromReceivedMessage for a given whisper.ReceivedMessage it extracts the
 // used bloom filter.
-func (s *WakuMailServer) bloomFromReceivedMessage(msg *wakucommon.ReceivedMessage) ([]byte, error) {
+func (s *WakuMailServer) bloomFromReceivedMessage(msg *wakuv1common.ReceivedMessage) ([]byte, error) {
 	payloadSize := len(msg.Payload)
 
 	if payloadSize < 8 {
 		return nil, errors.New("Undersized p2p request")
 	} else if payloadSize == 8 {
-		return wakucommon.MakeFullNodeBloom(), nil
-	} else if payloadSize < 8+wakucommon.BloomFilterSize {
+		return wakuv1common.MakeFullNodeBloom(), nil
+	} else if payloadSize < 8+wakuv1common.BloomFilterSize {
 		return nil, errors.New("Undersized bloom filter in p2p request")
 	}
 
-	return msg.Payload[8 : 8+wakucommon.BloomFilterSize], nil
+	return msg.Payload[8 : 8+wakuv1common.BloomFilterSize], nil
 }
 
-func (s *WakuMailServer) decompositeRequest(peerID []byte, request *wakucommon.Envelope) (MessagesRequestPayload, error) {
+func (s *WakuMailServer) decompositeRequest(peerID []byte, request *wakuv1common.Envelope) (MessagesRequestPayload, error) {
 	var (
 		payload MessagesRequestPayload
 		err     error
@@ -211,12 +213,12 @@ func (s *WakuMailServer) decompositeRequest(peerID []byte, request *wakucommon.E
 		return payload, err
 	}
 
-	if len(decrypted.Payload) >= requestTimeRangeLength+wakucommon.BloomFilterSize+requestLimitLength {
-		payload.Limit = binary.BigEndian.Uint32(decrypted.Payload[requestTimeRangeLength+wakucommon.BloomFilterSize:])
+	if len(decrypted.Payload) >= requestTimeRangeLength+wakuv1common.BloomFilterSize+requestLimitLength {
+		payload.Limit = binary.BigEndian.Uint32(decrypted.Payload[requestTimeRangeLength+wakuv1common.BloomFilterSize:])
 	}
 
-	if len(decrypted.Payload) == requestTimeRangeLength+wakucommon.BloomFilterSize+requestLimitLength+DBKeyLength {
-		payload.Cursor = decrypted.Payload[requestTimeRangeLength+wakucommon.BloomFilterSize+requestLimitLength:]
+	if len(decrypted.Payload) == requestTimeRangeLength+wakuv1common.BloomFilterSize+requestLimitLength+DBKeyLength {
+		payload.Cursor = decrypted.Payload[requestTimeRangeLength+wakuv1common.BloomFilterSize+requestLimitLength:]
 	}
 
 	return payload, nil
@@ -237,7 +239,7 @@ func (s *WakuMailServer) setupDecryptor(password, asymKey string) error {
 			return fmt.Errorf("save symmetric key: %v", err)
 		}
 
-		s.symFilter = &wakucommon.Filter{KeySym: symKey}
+		s.symFilter = &wakuv1common.Filter{KeySym: symKey}
 	}
 
 	if asymKey != "" {
@@ -245,7 +247,7 @@ func (s *WakuMailServer) setupDecryptor(password, asymKey string) error {
 		if err != nil {
 			return err
 		}
-		s.asymFilter = &wakucommon.Filter{KeyAsym: keyAsym}
+		s.asymFilter = &wakuv1common.Filter{KeyAsym: keyAsym}
 	}
 
 	return nil
@@ -253,7 +255,7 @@ func (s *WakuMailServer) setupDecryptor(password, asymKey string) error {
 
 // openEnvelope tries to decrypt an envelope, first based on asymetric key (if
 // provided) and second on the symetric key (if provided)
-func (s *WakuMailServer) openEnvelope(request *wakucommon.Envelope) *wakucommon.ReceivedMessage {
+func (s *WakuMailServer) openEnvelope(request *wakuv1common.Envelope) *wakuv1common.ReceivedMessage {
 	if s.asymFilter != nil {
 		if d := request.Open(s.asymFilter); d != nil {
 			return d
@@ -267,7 +269,7 @@ func (s *WakuMailServer) openEnvelope(request *wakucommon.Envelope) *wakucommon.
 	return nil
 }
 
-func (s *WakuMailServer) decodeRequest(peerID []byte, request *wakucommon.Envelope) (MessagesRequestPayload, error) {
+func (s *WakuMailServer) decodeRequest(peerID []byte, request *wakuv1common.Envelope) (MessagesRequestPayload, error) {
 	var payload MessagesRequestPayload
 
 	if s.minRequestPoW > 0.0 && request.PoW() < s.minRequestPoW {
@@ -276,12 +278,12 @@ func (s *WakuMailServer) decodeRequest(peerID []byte, request *wakucommon.Envelo
 
 	decrypted := s.openEnvelope(request)
 	if decrypted == nil {
-		log.Warn("Failed to decrypt p2p request")
+		logutils.ZapLogger().Warn("Failed to decrypt p2p request")
 		return payload, errors.New("failed to decrypt p2p request")
 	}
 
 	if err := checkMsgSignature(decrypted.Src, peerID); err != nil {
-		log.Warn("Check message signature failed", "err", err.Error())
+		logutils.ZapLogger().Warn("Check message signature failed", zap.Error(err))
 		return payload, fmt.Errorf("check message signature failed: %v", err)
 	}
 
@@ -294,7 +296,7 @@ func (s *WakuMailServer) decodeRequest(peerID []byte, request *wakucommon.Envelo
 	}
 
 	if payload.Upper < payload.Lower {
-		log.Error("Query range is invalid: lower > upper", "lower", payload.Lower, "upper", payload.Upper)
+		logutils.ZapLogger().Error("Query range is invalid: lower > upper", zap.Uint32("lower", payload.Lower), zap.Uint32("upper", payload.Upper))
 		return payload, errors.New("query range is invalid: lower > upper")
 	}
 
@@ -308,7 +310,7 @@ func (s *WakuMailServer) decodeRequest(peerID []byte, request *wakucommon.Envelo
 type adapter interface {
 	CreateRequestFailedPayload(reqID types.Hash, err error) []byte
 	CreateRequestCompletedPayload(reqID, lastEnvelopeHash types.Hash, cursor []byte) []byte
-	CreateSyncResponse(envelopes []types.Envelope, cursor []byte, final bool, err string) interface{}
+	CreateSyncResponse(envelopes []wakutypes.Envelope, cursor []byte, final bool, err string) interface{}
 	CreateRawSyncResponse(envelopes []rlp.RawValue, cursor []byte, final bool, err string) interface{}
 }
 
@@ -321,14 +323,14 @@ type wakuAdapter struct{}
 var _ adapter = (*wakuAdapter)(nil)
 
 func (wakuAdapter) CreateRequestFailedPayload(reqID types.Hash, err error) []byte {
-	return waku.CreateMailServerRequestFailedPayload(common.Hash(reqID), err)
+	return wakuv1.CreateMailServerRequestFailedPayload(common.Hash(reqID), err)
 }
 
 func (wakuAdapter) CreateRequestCompletedPayload(reqID, lastEnvelopeHash types.Hash, cursor []byte) []byte {
-	return waku.CreateMailServerRequestCompletedPayload(common.Hash(reqID), common.Hash(lastEnvelopeHash), cursor)
+	return wakuv1.CreateMailServerRequestCompletedPayload(common.Hash(reqID), common.Hash(lastEnvelopeHash), cursor)
 }
 
-func (wakuAdapter) CreateSyncResponse(_ []types.Envelope, _ []byte, _ bool, _ string) interface{} {
+func (wakuAdapter) CreateSyncResponse(_ []wakutypes.Envelope, _ []byte, _ bool, _ string) interface{} {
 	return nil
 }
 
@@ -353,7 +355,7 @@ type service interface {
 // -----------
 
 type wakuService struct {
-	*waku.Waku
+	*wakuv1.Waku
 }
 
 func (s *wakuService) SendRawSyncResponse(peerID []byte, data interface{}) error {
@@ -399,13 +401,13 @@ func newMailServer(cfg Config, adapter adapter, service service) (*mailServer, e
 	// Open database in the last step in order not to init with error
 	// and leave the database open by accident.
 	if cfg.PostgresEnabled {
-		log.Info("Connecting to postgres database")
+		logutils.ZapLogger().Info("Connecting to postgres database")
 		database, err := NewPostgresDB(cfg.PostgresURI)
 		if err != nil {
 			return nil, fmt.Errorf("open DB: %s", err)
 		}
 		s.db = database
-		log.Info("Connected to postgres database")
+		logutils.ZapLogger().Info("Connected to postgres database")
 	} else {
 		// Defaults to LevelDB
 		database, err := NewLevelDB(cfg.DataDir)
@@ -435,10 +437,10 @@ func (s *mailServer) setupCleaner(retention time.Duration) {
 	s.cleaner.Start()
 }
 
-func (s *mailServer) Archive(env types.Envelope) {
+func (s *mailServer) Archive(env wakutypes.Envelope) {
 	err := s.db.SaveEnvelope(env)
 	if err != nil {
-		log.Error("Could not save envelope", "hash", env.Hash().String())
+		logutils.ZapLogger().Error("Could not save envelope", zap.Stringer("hash", env.Hash()))
 	}
 }
 
@@ -447,34 +449,34 @@ func (s *mailServer) DeliverMail(peerID, reqID types.Hash, req MessagesRequestPa
 	defer timer.ObserveDuration()
 
 	deliveryAttemptsCounter.Inc()
-	log.Info(
+	logutils.ZapLogger().Info(
 		"[mailserver:DeliverMail] delivering mail",
-		"peerID", peerID.String(),
-		"requestID", reqID.String(),
+		zap.Stringer("peerID", peerID),
+		zap.Stringer("requestID", reqID),
 	)
 
 	req.SetDefaults()
 
-	log.Info(
+	logutils.ZapLogger().Info(
 		"[mailserver:DeliverMail] processing request",
-		"peerID", peerID.String(),
-		"requestID", reqID.String(),
-		"lower", req.Lower,
-		"upper", req.Upper,
-		"bloom", req.Bloom,
-		"topics", req.Topics,
-		"limit", req.Limit,
-		"cursor", req.Cursor,
-		"batch", req.Batch,
+		zap.Stringer("peerID", peerID),
+		zap.Stringer("requestID", reqID),
+		zap.Uint32("lower", req.Lower),
+		zap.Uint32("upper", req.Upper),
+		zap.Binary("bloom", req.Bloom),
+		zap.Any("topics", req.Topics),
+		zap.Uint32("limit", req.Limit),
+		zap.Binary("cursor", req.Cursor),
+		zap.Bool("batch", req.Batch),
 	)
 
 	if err := req.Validate(); err != nil {
 		syncFailuresCounter.WithLabelValues("req_invalid").Inc()
-		log.Error(
+		logutils.ZapLogger().Error(
 			"[mailserver:DeliverMail] request invalid",
-			"peerID", peerID.String(),
-			"requestID", reqID.String(),
-			"err", err,
+			zap.Stringer("peerID", peerID),
+			zap.Stringer("requestID", reqID),
+			zap.Error(err),
 		)
 		s.sendHistoricMessageErrorResponse(peerID, reqID, fmt.Errorf("request is invalid: %v", err))
 		return
@@ -482,10 +484,10 @@ func (s *mailServer) DeliverMail(peerID, reqID types.Hash, req MessagesRequestPa
 
 	if s.exceedsPeerRequests(peerID) {
 		deliveryFailuresCounter.WithLabelValues("peer_req_limit").Inc()
-		log.Error(
+		logutils.ZapLogger().Error(
 			"[mailserver:DeliverMail] peer exceeded the limit",
-			"peerID", peerID.String(),
-			"requestID", reqID.String(),
+			zap.Stringer("peerID", peerID),
+			zap.Stringer("requestID", reqID),
 		)
 		s.sendHistoricMessageErrorResponse(peerID, reqID, fmt.Errorf("rate limit exceeded"))
 		return
@@ -497,11 +499,11 @@ func (s *mailServer) DeliverMail(peerID, reqID types.Hash, req MessagesRequestPa
 
 	iter, err := s.createIterator(req)
 	if err != nil {
-		log.Error(
+		logutils.ZapLogger().Error(
 			"[mailserver:DeliverMail] request failed",
-			"peerID", peerID.String(),
-			"requestID", reqID.String(),
-			"err", err,
+			zap.Stringer("peerID", peerID),
+			zap.Stringer("requestID", reqID),
+			zap.Error(err),
 		)
 		return
 	}
@@ -512,6 +514,7 @@ func (s *mailServer) DeliverMail(peerID, reqID types.Hash, req MessagesRequestPa
 	cancelProcessing := make(chan struct{})
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		counter := 0
 		for bundle := range bundles {
 			if err := s.sendRawEnvelopes(peerID, bundle, req.Batch); err != nil {
@@ -522,11 +525,11 @@ func (s *mailServer) DeliverMail(peerID, reqID types.Hash, req MessagesRequestPa
 			counter++
 		}
 		close(errCh)
-		log.Info(
+		logutils.ZapLogger().Info(
 			"[mailserver:DeliverMail] finished sending bundles",
-			"peerID", peerID,
-			"requestID", reqID.String(),
-			"counter", counter,
+			zap.Stringer("peerID", peerID),
+			zap.Stringer("requestID", reqID),
+			zap.Int("counter", counter),
 		)
 	}()
 
@@ -544,11 +547,11 @@ func (s *mailServer) DeliverMail(peerID, reqID types.Hash, req MessagesRequestPa
 	// Wait for the goroutine to finish the work. It may return an error.
 	if err := <-errCh; err != nil {
 		deliveryFailuresCounter.WithLabelValues("process").Inc()
-		log.Error(
+		logutils.ZapLogger().Error(
 			"[mailserver:DeliverMail] error while processing",
-			"err", err,
-			"peerID", peerID,
-			"requestID", reqID,
+			zap.Stringer("peerID", peerID),
+			zap.Stringer("requestID", reqID),
+			zap.Error(err),
 		)
 		s.sendHistoricMessageErrorResponse(peerID, reqID, err)
 		return
@@ -557,29 +560,29 @@ func (s *mailServer) DeliverMail(peerID, reqID types.Hash, req MessagesRequestPa
 	// Processing of the request could be finished earlier due to iterator error.
 	if err := iter.Error(); err != nil {
 		deliveryFailuresCounter.WithLabelValues("iterator").Inc()
-		log.Error(
+		logutils.ZapLogger().Error(
 			"[mailserver:DeliverMail] iterator failed",
-			"err", err,
-			"peerID", peerID,
-			"requestID", reqID,
+			zap.Stringer("peerID", peerID),
+			zap.Stringer("requestID", reqID),
+			zap.Error(err),
 		)
 		s.sendHistoricMessageErrorResponse(peerID, reqID, err)
 		return
 	}
 
-	log.Info(
+	logutils.ZapLogger().Info(
 		"[mailserver:DeliverMail] sending historic message response",
-		"peerID", peerID,
-		"requestID", reqID,
-		"last", lastEnvelopeHash,
-		"next", nextPageCursor,
+		zap.Stringer("peerID", peerID),
+		zap.Stringer("requestID", reqID),
+		zap.Stringer("last", lastEnvelopeHash),
+		zap.Binary("next", nextPageCursor),
 	)
 
 	s.sendHistoricMessageResponse(peerID, reqID, lastEnvelopeHash, nextPageCursor)
 }
 
 func (s *mailServer) SyncMail(peerID types.Hash, req MessagesRequestPayload) error {
-	log.Info("Started syncing envelopes", "peer", peerID.String(), "req", req)
+	logutils.ZapLogger().Info("Started syncing envelopes", zap.Stringer("peer", peerID), zap.Any("req", req))
 
 	requestID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), rand.Intn(1000)) // nolint: gosec
 
@@ -588,7 +591,7 @@ func (s *mailServer) SyncMail(peerID types.Hash, req MessagesRequestPayload) err
 	// Check rate limiting for a requesting peer.
 	if s.exceedsPeerRequests(peerID) {
 		syncFailuresCounter.WithLabelValues("req_per_sec_limit").Inc()
-		log.Error("Peer exceeded request per seconds limit", "peerID", peerID.String())
+		logutils.ZapLogger().Error("Peer exceeded request per seconds limit", zap.Stringer("peerID", peerID))
 		return fmt.Errorf("requests per seconds limit exceeded")
 	}
 
@@ -611,6 +614,7 @@ func (s *mailServer) SyncMail(peerID types.Hash, req MessagesRequestPayload) err
 	cancelProcessing := make(chan struct{})
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		for bundle := range bundles {
 			resp := s.adapter.CreateRawSyncResponse(bundle, nil, false, "")
 			if err := s.service.SendRawSyncResponse(peerID.Bytes(), resp); err != nil {
@@ -653,7 +657,7 @@ func (s *mailServer) SyncMail(peerID types.Hash, req MessagesRequestPayload) err
 		return fmt.Errorf("LevelDB iterator failed: %v", err)
 	}
 
-	log.Info("Finished syncing envelopes", "peer", peerID.String())
+	logutils.ZapLogger().Info("Finished syncing envelopes", zap.Stringer("peer", peerID))
 
 	err = s.service.SendSyncResponse(
 		peerID.Bytes(),
@@ -671,7 +675,7 @@ func (s *mailServer) SyncMail(peerID types.Hash, req MessagesRequestPayload) err
 func (s *mailServer) Close() {
 	if s.db != nil {
 		if err := s.db.Close(); err != nil {
-			log.Error("closing database failed", "err", err)
+			logutils.ZapLogger().Error("closing database failed", zap.Error(err))
 		}
 	}
 	if s.rateLimiter != nil {
@@ -695,14 +699,14 @@ func (s *mailServer) exceedsPeerRequests(peerID types.Hash) bool {
 		return false
 	}
 
-	log.Info("peerID exceeded the number of requests per second", "peerID", peerID.String())
+	logutils.ZapLogger().Info("peerID exceeded the number of requests per second", zap.Stringer("peerID", peerID))
 	return true
 }
 
 func (s *mailServer) createIterator(req MessagesRequestPayload) (Iterator, error) {
 	var (
 		emptyHash  types.Hash
-		emptyTopic types.TopicType
+		emptyTopic wakutypes.TopicType
 		ku, kl     *DBKey
 	)
 
@@ -743,18 +747,18 @@ func (s *mailServer) processRequestInBundles(
 		lastEnvelopeHash       types.Hash
 	)
 
-	log.Info(
+	logutils.ZapLogger().Info(
 		"[mailserver:processRequestInBundles] processing request",
-		"requestID", requestID,
-		"limit", limit,
+		zap.String("requestID", requestID),
+		zap.Int("limit", limit),
 	)
 
-	var topicsMap map[types.TopicType]bool
+	var topicsMap map[wakutypes.TopicType]bool
 
 	if len(topics) != 0 {
-		topicsMap = make(map[types.TopicType]bool)
+		topicsMap = make(map[wakutypes.TopicType]bool)
 		for _, t := range topics {
-			topicsMap[types.BytesToTopic(t)] = true
+			topicsMap[wakutypes.BytesToTopic(t)] = true
 		}
 	}
 
@@ -776,10 +780,10 @@ func (s *mailServer) processRequestInBundles(
 			err = errors.New("either topics or bloom must be specified")
 		}
 		if err != nil {
-			log.Error(
+			logutils.ZapLogger().Error(
 				"[mailserver:processRequestInBundles]Failed to get envelope from iterator",
-				"err", err,
-				"requestID", requestID,
+				zap.String("requestID", requestID),
+				zap.Error(err),
 			)
 			continue
 		}
@@ -790,9 +794,10 @@ func (s *mailServer) processRequestInBundles(
 
 		key, err := iter.DBKey()
 		if err != nil {
-			log.Error(
+			logutils.ZapLogger().Error(
 				"[mailserver:processRequestInBundles] failed getting key",
-				"requestID", requestID,
+				zap.String("requestID", requestID),
+				zap.Error(err),
 			)
 			break
 
@@ -836,13 +841,13 @@ func (s *mailServer) processRequestInBundles(
 		processedEnvelopesSize += int64(bundleSize)
 	}
 
-	log.Info(
+	logutils.ZapLogger().Info(
 		"[mailserver:processRequestInBundles] publishing envelopes",
-		"requestID", requestID,
-		"batchesCount", len(batches),
-		"envelopeCount", processedEnvelopes,
-		"processedEnvelopesSize", processedEnvelopesSize,
-		"cursor", nextCursor,
+		zap.String("requestID", requestID),
+		zap.Int("batchesCount", len(batches)),
+		zap.Int("envelopeCount", processedEnvelopes),
+		zap.Int64("processedEnvelopesSize", processedEnvelopesSize),
+		zap.Binary("cursor", nextCursor),
 	)
 
 	// Publish
@@ -855,15 +860,15 @@ batchLoop:
 		// the consumer of `output` channel exits prematurely.
 		// In such a case, we should stop pushing batches and exit.
 		case <-cancel:
-			log.Info(
+			logutils.ZapLogger().Info(
 				"[mailserver:processRequestInBundles] failed to push all batches",
-				"requestID", requestID,
+				zap.String("requestID", requestID),
 			)
 			break batchLoop
 		case <-time.After(timeout):
-			log.Error(
+			logutils.ZapLogger().Error(
 				"[mailserver:processRequestInBundles] timed out pushing a batch",
-				"requestID", requestID,
+				zap.String("requestID", requestID),
 			)
 			break batchLoop
 		}
@@ -872,9 +877,9 @@ batchLoop:
 	envelopesCounter.Inc()
 	sentEnvelopeBatchSizeMeter.Observe(float64(processedEnvelopesSize))
 
-	log.Info(
+	logutils.ZapLogger().Info(
 		"[mailserver:processRequestInBundles] envelopes published",
-		"requestID", requestID,
+		zap.String("requestID", requestID),
 	)
 	close(output)
 
@@ -903,11 +908,11 @@ func (s *mailServer) sendHistoricMessageResponse(peerID, reqID, lastEnvelopeHash
 	err := s.service.SendHistoricMessageResponse(peerID.Bytes(), payload)
 	if err != nil {
 		deliveryFailuresCounter.WithLabelValues("historic_msg_resp").Inc()
-		log.Error(
+		logutils.ZapLogger().Error(
 			"[mailserver:DeliverMail] error sending historic message response",
-			"err", err,
-			"peerID", peerID,
-			"requestID", reqID,
+			zap.Stringer("peerID", peerID),
+			zap.Stringer("requestID", reqID),
+			zap.Error(err),
 		)
 	}
 }
@@ -918,12 +923,12 @@ func (s *mailServer) sendHistoricMessageErrorResponse(peerID, reqID types.Hash, 
 	// if we can't report an error, probably something is wrong with p2p connection,
 	// so we just print a log entry to document this sad fact
 	if err != nil {
-		log.Error("Error while reporting error response", "err", err, "peerID", peerID.String())
+		logutils.ZapLogger().Error("Error while reporting error response", zap.Stringer("peerID", peerID), zap.Error(err))
 	}
 }
 
 func extractBloomFromEncodedEnvelope(rawValue rlp.RawValue) ([]byte, error) {
-	var envelope wakucommon.Envelope
+	var envelope wakuv1common.Envelope
 	decodeErr := rlp.DecodeBytes(rawValue, &envelope)
 	if decodeErr != nil {
 		return nil, decodeErr

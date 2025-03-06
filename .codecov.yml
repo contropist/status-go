@@ -1,0 +1,57 @@
+# When modifying this file, please validate using:
+#  make codecov-validate
+
+codecov:
+  require_ci_to_pass: false
+  notify:
+    wait_for_ci: false
+    after_n_builds: 2
+
+ignore:
+  - "_.*"
+  - "vendor"
+  - "scripts"
+  - "contracts"
+  - "Makefile"
+
+coverage:
+  status:
+    project:
+      unit-tests:
+        target: auto
+        threshold: 10%
+        flags:
+          - unit
+      functional-tests:
+        threshold: 10%
+        target: auto
+        flags:
+          - functional
+    patch:
+      default:
+        target: 50
+      unit-tests:
+        informational: true
+        flags:
+          - unit
+      functional-tests:
+        informational: true
+        flags:
+          - functional
+
+flags:
+  unit-tests:
+    paths:
+      - ".*"
+    carryforward: false
+  functional-tests:
+    paths:
+      - ".*"
+    carryforward: false
+
+comment:
+  behavior: default
+  layout: diff,flags,tree
+
+github_checks:
+  annotations: false

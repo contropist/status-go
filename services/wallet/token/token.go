@@ -1,5 +1,7 @@
 package token
 
+//go:generate mockgen -source=token.go -destination=mock/token/tokenmanager.go
+
 import (
 	"context"
 	"database/sql"
@@ -12,17 +14,21 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/event"
-	"github.com/ethereum/go-ethereum/log"
+	gocommon "github.com/status-im/status-go/common"
 	"github.com/status-im/status-go/contracts"
 	"github.com/status-im/status-go/contracts/community-tokens/assets"
 	eth_node_types "github.com/status-im/status-go/eth-node/types"
+	"github.com/status-im/status-go/logutils"
 	"github.com/status-im/status-go/multiaccounts/accounts"
 	"github.com/status-im/status-go/params"
 	"github.com/status-im/status-go/protocol/communities/token"
+	"github.com/status-im/status-go/protocol/protobuf"
 	"github.com/status-im/status-go/rpc"
 	"github.com/status-im/status-go/rpc/network"
 	"github.com/status-im/status-go/server"
@@ -56,7 +62,6 @@ type Token struct {
 
 	CommunityData *community.Data `json:"community_data,omitempty"`
 	Verified      bool            `json:"verified"`
-	TokenListID   string          `json:"tokenListId"`
 }
 
 type ReceivedToken struct {
@@ -71,10 +76,11 @@ func (t *Token) IsNative() bool {
 }
 
 type List struct {
-	Name    string   `json:"name"`
-	Tokens  []*Token `json:"tokens"`
-	Source  string   `json:"source"`
-	Version string   `json:"version"`
+	Name                string   `json:"name"`
+	Tokens              []*Token `json:"tokens"`
+	Source              string   `json:"source"`
+	Version             string   `json:"version"`
+	LastUpdateTimestamp int64    `json:"lastUpdateTimestamp"`
 }
 
 type ListWrapper struct {
@@ -100,7 +106,7 @@ type Manager struct {
 	RPCClient            rpc.ClientInterface
 	ContractMaker        *contracts.ContractMaker
 	networkManager       network.ManagerInterface
-	stores               []store // Set on init, not changed afterwards
+	stores               []Store // Set on init, not changed afterwards
 	communityTokensDB    *communitytokensdatabase.Database
 	communityManager     *community.Manager
 	mediaServer          *server.MediaServer
@@ -130,7 +136,7 @@ func mergeTokens(sliceLists [][]*Token) []*Token {
 	return res
 }
 
-func prepareTokens(networkManager network.ManagerInterface, stores []store) []*Token {
+func prepareTokens(networkManager network.ManagerInterface, stores []Store) []*Token {
 	tokens := make([]*Token, 0)
 
 	networks, err := networkManager.GetAll()
@@ -169,7 +175,7 @@ func NewTokenManager(
 	tokenBalancesStorage TokenBalancesStorage,
 ) *Manager {
 	maker, _ := contracts.NewContractMaker(RPCClient)
-	stores := []store{newUniswapStore(), newDefaultStore()}
+	stores := []Store{NewUniswapStore(), NewDefaultStore(), NewAaveStore()}
 	tokens := prepareTokens(networkManager, stores)
 
 	return &Manager{
@@ -355,7 +361,10 @@ func (tm *Manager) FindOrCreateTokenByAddress(ctx context.Context, chainID uint6
 }
 
 func (tm *Manager) MarkAsPreviouslyOwnedToken(token *Token, owner common.Address) (bool, error) {
-	log.Info("Marking token as previously owned", "token", token, "owner", owner)
+	logutils.ZapLogger().Info("Marking token as previously owned",
+		zap.Any("token", token),
+		zap.Stringer("owner", owner),
+	)
 	if token == nil {
 		return false, errors.New("token is nil")
 	}
@@ -373,7 +382,10 @@ func (tm *Manager) MarkAsPreviouslyOwnedToken(token *Token, owner common.Address
 	} else {
 		for _, t := range tokens[owner] {
 			if t.Address == token.Address && t.ChainID == token.ChainID && t.Symbol == token.Symbol {
-				log.Info("Token already marked as previously owned", "token", token, "owner", owner)
+				logutils.ZapLogger().Info("Token already marked as previously owned",
+					zap.Any("token", token),
+					zap.Stringer("owner", owner),
+				)
 				return false, nil
 			}
 		}
@@ -423,7 +435,7 @@ func (tm *Manager) discoverTokenCommunityID(ctx context.Context, token *Token, a
 
 	update, err := tm.db.Prepare("UPDATE tokens SET community_id=? WHERE network_id=? AND address=?")
 	if err != nil {
-		log.Error("Cannot prepare token update query", err)
+		logutils.ZapLogger().Error("Cannot prepare token update query", zap.Error(err))
 		return
 	}
 
@@ -431,7 +443,7 @@ func (tm *Manager) discoverTokenCommunityID(ctx context.Context, token *Token, a
 		// Update token community ID to prevent further checks
 		_, err := update.Exec("", token.ChainID, token.Address)
 		if err != nil {
-			log.Error("Cannot update community id", err)
+			logutils.ZapLogger().Error("Cannot update community id", zap.Error(err))
 		}
 		return
 	}
@@ -449,7 +461,7 @@ func (tm *Manager) discoverTokenCommunityID(ctx context.Context, token *Token, a
 
 	_, err = update.Exec(communityID, token.ChainID, token.Address)
 	if err != nil {
-		log.Error("Cannot update community id", err)
+		logutils.ZapLogger().Error("Cannot update community id", zap.Error(err))
 	}
 }
 
@@ -485,12 +497,12 @@ func (tm *Manager) getNativeTokens() ([]*Token, error) {
 func (tm *Manager) GetAllTokens() ([]*Token, error) {
 	allTokens, err := tm.GetCustoms(true)
 	if err != nil {
-		log.Error("can't fetch custom tokens", "error", err)
+		logutils.ZapLogger().Error("can't fetch custom tokens", zap.Error(err))
 	}
 
 	allTokens = append(tm.getTokens(), allTokens...)
 
-	overrideTokensInPlace(tm.networkManager.GetConfiguredNetworks(), allTokens)
+	overrideTokensInPlace(tm.networkManager.GetEmbeddedNetworks(), allTokens)
 
 	native, err := tm.getNativeTokens()
 	if err != nil {
@@ -560,16 +572,19 @@ func (tm *Manager) GetList() *ListWrapper {
 		})
 	}
 
-	updatedAt := time.Now().Unix()
 	for _, store := range tm.stores {
-		updatedAt = store.GetUpdatedAt()
 		data = append(data, &List{
-			Name:    store.GetName(),
-			Tokens:  store.GetTokens(),
-			Source:  store.GetSource(),
-			Version: store.GetVersion(),
+			Name:                store.GetName(),
+			Tokens:              store.GetTokens(),
+			Source:              store.GetSource(),
+			Version:             store.GetVersion(),
+			LastUpdateTimestamp: store.GetUpdatedAt(),
 		})
 	}
+
+	// for now we use current time, but this time should represent the time when the lists were updated last time
+	updatedAt := time.Now().Unix()
+
 	return &ListWrapper{
 		Data:      data,
 		UpdatedAt: updatedAt,
@@ -610,6 +625,20 @@ func (tm *Manager) DiscoverToken(ctx context.Context, chainID uint64, address co
 		Decimals: uint(decimal),
 		ChainID:  chainID,
 	}, nil
+}
+
+func (tm *Manager) GetCommunityTokenType(chainID uint64, tokenContractAddress string) (protobuf.CommunityTokenType, error) {
+	if tm.communityTokensDB != nil {
+		return tm.communityTokensDB.GetTokenType(chainID, tokenContractAddress)
+	}
+	return protobuf.CommunityTokenType_UNKNOWN_TOKEN_TYPE, nil
+}
+
+func (tm *Manager) GetCommunityTokenPrivilegesLevel(chainID uint64, tokenContractAddress string) (token.PrivilegesLevel, error) {
+	if tm.communityTokensDB != nil {
+		return tm.communityTokensDB.GetTokenPrivilegesLevel(chainID, tokenContractAddress)
+	}
+	return token.CommunityLevel, nil
 }
 
 func (tm *Manager) getTokensFromDB(query string, args ...any) ([]*Token, error) {
@@ -690,6 +719,7 @@ func (tm *Manager) DeleteCustom(chainID uint64, address common.Address) error {
 }
 
 func (tm *Manager) SignalCommunityTokenReceived(address common.Address, txHash common.Hash, value *big.Int, t *Token, isFirst bool) {
+	defer gocommon.LogOnPanic()
 	if tm.walletFeed == nil || t == nil || t.CommunityData == nil {
 		return
 	}
@@ -786,7 +816,7 @@ func (tm *Manager) onAccountsChange(changedAddresses []common.Address, eventType
 		for _, account := range changedAddresses {
 			err := tm.removeTokenBalances(account)
 			if err != nil {
-				log.Error("token.Manager: can't remove token balances", "error", err)
+				logutils.ZapLogger().Error("token.Manager: can't remove token balances", zap.Error(err))
 			}
 		}
 	}
@@ -808,6 +838,7 @@ func (tm *Manager) GetCachedBalancesByChain(accounts, tokenAddresses []common.Ad
 		chainIDStrings[i] = fmt.Sprintf("%d", chainID)
 	}
 
+	//nolint: gosec
 	query := `SELECT chain_id, user_address, token_address, raw_balance
 			  	FROM token_balances
 				WHERE user_address IN (` + strings.Join(accountStrings, ",") + `)

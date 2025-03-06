@@ -1,14 +1,19 @@
 #!/usr/bin/env groovy
-library 'status-jenkins-lib@v1.9.6'
+library 'status-jenkins-lib@v1.9.20'
 
 pipeline {
-  agent { label 'linux && x86_64 && nix-2.19' }
+  agent { label 'linux && x86_64 && nix-2.24' }
 
   parameters {
     string(
       name: 'BRANCH',
       defaultValue: 'develop',
       description: 'Name of branch to build.'
+    )
+    booleanParam(
+      name: 'FUNCTIONAL_TESTS_REPORT_CODECOV',
+      defaultValue: true,
+      description: 'Should the job report test coverage to Codecov?'
     )
   }
 
@@ -19,21 +24,37 @@ pipeline {
     disableConcurrentBuilds()
     /* manage how many builds we keep */
     buildDiscarder(logRotator(
-      numToKeepStr: '5',
-      daysToKeepStr: '30',
-      artifactNumToKeepStr: '1',
+      numToKeepStr: getAmountToKeep(),
+      daysToKeepStr: '-1',
+      artifactNumToKeepStr: getAmountToKeep(),
     ))
   }
 
   environment {
     PLATFORM = 'tests-rpc'
     PKG_URL = "${currentBuild.absoluteUrl}/consoleText"
+
+    /* Hack-fix for params not being set in env on first job run. */
+    BRANCH =                           "${params.BRANCH}"
+    FUNCTIONAL_TESTS_REPORT_CODECOV = "${params.FUNCTIONAL_TESTS_REPORT_CODECOV}"
   }
 
   stages {
     stage('RPC Tests') {
       steps { script {
-        sh 'make run-integration-tests'
+        withCredentials([
+          string(
+            credentialsId: 'codecov-repository-upload-token',
+            variable: 'CODECOV_TOKEN'
+          ),
+          usernamePassword(
+            credentialsId: "api-proxy-devel",
+            usernameVariable: 'STATUS_BUILD_PROXY_USER',
+            passwordVariable: 'STATUS_BUILD_PROXY_PASSWORD'
+    ),
+        ]) {
+          nix.shell('make test-functional', pure: false)
+        }
       } }
     }
   } // stages
@@ -42,11 +63,11 @@ pipeline {
     always {
       script {
         archiveArtifacts(
-          artifacts: '**/results.xml',
+          artifacts: 'tests-functional/reports/*.xml, tests-functional/*.log, tests-functional/coverage/coverage.html',
           allowEmptyArchive: true,
         )
         junit(
-          testResults: '**/results.xml',
+          testResults: 'tests-functional/reports/*.xml',
           skipOldReports: true,
           skipPublishingChecks: true,
           skipMarkingBuildUnstable: true,
@@ -55,6 +76,17 @@ pipeline {
     }
     success { script { github.notifyPR(true) } }
     failure { script { github.notifyPR(false) } }
-    cleanup { sh 'make git-clean' }
+      cleanup {
+        script {
+          sh '''
+            docker ps -a --filter "name=status-go-func-tests-${BUILD_ID}" -q | xargs -r docker rm -f
+            make git-clean
+          '''
+        }
+      }
   } // post
 } // pipeline
+
+def isDevelopJob() { env.JOB_BASE_NAME == 'tests-rpc-develop' }
+
+def getAmountToKeep() { isDevelopJob() ? '30' : '5' }

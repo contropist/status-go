@@ -1568,6 +1568,13 @@ func (o *Community) setPrivateKey(pk *ecdsa.PrivateKey) {
 	}
 }
 
+func (o *Community) UniversalChatID() string {
+	// Using Member updates channelID as chatID to act as a universal content-topic for all chats in the community as explained here https://forum.vac.dev/t/status-communities-review-and-proposed-usage-of-waku-content-topics/335
+	// This is to match filter criteria of community with the content-topic usage.
+	// This specific topic is chosen as existing users before the change are already subscribed to this and will not get affected by it.
+	return o.MemberUpdateChannelID()
+}
+
 func (o *Community) SetResendAccountsClock(clock uint64) {
 	o.config.CommunityDescription.ResendAccountsClock = clock
 }
@@ -1625,6 +1632,12 @@ func (o *Community) marshaledDescription() ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	// Ensure that communities created prior to the introduction of tokenized ownership
+	// propagate community ID through the description.
+	if len(clone.ID) == 0 {
+		clone.ID = o.IDString()
 	}
 
 	return proto.Marshal(clone)
@@ -2438,7 +2451,8 @@ func (o *Community) CreateDeepCopy() *Community {
 			PubsubTopicPrivateKey:               o.config.PubsubTopicPrivateKey,
 			LastOpenedAt:                        o.config.LastOpenedAt,
 		},
-		timesource: o.timesource,
+		timesource:  o.timesource,
+		mediaServer: o.mediaServer,
 	}
 }
 

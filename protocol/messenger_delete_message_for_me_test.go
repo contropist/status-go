@@ -9,14 +9,14 @@ import (
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/zap"
 
-	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
 	"github.com/status-im/status-go/eth-node/crypto"
-	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/protocol/common"
 	"github.com/status-im/status-go/protocol/encryption/multidevice"
 	"github.com/status-im/status-go/protocol/protobuf"
 	"github.com/status-im/status-go/protocol/tt"
-	"github.com/status-im/status-go/waku"
+	"github.com/status-im/status-go/wakuv1"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 func TestMessengerDeleteMessageForMeSuite(t *testing.T) {
@@ -30,7 +30,7 @@ type MessengerDeleteMessageForMeSuite struct {
 	alice2     *Messenger
 	// If one wants to send messages between different instances of Messenger,
 	// a single waku service should be shared.
-	shh    types.Waku
+	shh    wakutypes.Waku
 	logger *zap.Logger
 }
 
@@ -59,10 +59,10 @@ func (s *MessengerDeleteMessageForMeSuite) otherNewMessenger() *Messenger {
 func (s *MessengerDeleteMessageForMeSuite) SetupTest() {
 	s.logger = tt.MustCreateTestLogger()
 
-	config := waku.DefaultConfig
+	config := wakuv1.DefaultConfig
 	config.MinimumAcceptedPoW = 0
-	shh := waku.New(&config, s.logger)
-	s.shh = gethbridge.NewGethWakuWrapper(shh)
+	shh := wakuv1.New(&config, s.logger)
+	s.shh = shh
 	s.Require().NoError(shh.Start())
 
 	s.alice1 = s.newMessenger()
@@ -81,7 +81,7 @@ func (s *MessengerDeleteMessageForMeSuite) Pair() {
 		DeviceType: "alice2",
 	})
 	s.Require().NoError(err)
-	response, err := s.alice2.SendPairInstallation(context.Background(), nil)
+	response, err := s.alice2.SendPairInstallation(context.Background(), "", nil)
 	s.Require().NoError(err)
 	s.Require().NotNil(response)
 	s.Require().Len(response.Chats(), 1)
@@ -101,7 +101,7 @@ func (s *MessengerDeleteMessageForMeSuite) Pair() {
 	s.Require().Equal("alice2", actualInstallation.InstallationMetadata.Name)
 	s.Require().Equal("alice2", actualInstallation.InstallationMetadata.DeviceType)
 
-	err = s.alice1.EnableInstallation(s.alice2.installationID)
+	_, err = s.alice1.EnableInstallation(s.alice2.installationID)
 	s.Require().NoError(err)
 }
 

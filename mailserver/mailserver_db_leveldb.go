@@ -1,19 +1,21 @@
 package mailserver
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/errors"
 	"github.com/syndtr/goleveldb/leveldb/iterator"
 	"github.com/syndtr/goleveldb/leveldb/util"
+	"go.uber.org/zap"
 
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rlp"
 
+	"github.com/status-im/status-go/common"
 	"github.com/status-im/status-go/eth-node/types"
-	waku "github.com/status-im/status-go/waku/common"
+	"github.com/status-im/status-go/logutils"
+	wakutypes "github.com/status-im/status-go/waku/types"
+	wakuv1common "github.com/status-im/status-go/wakuv1/common"
 )
 
 type LevelDB struct {
@@ -33,7 +35,7 @@ func (i *LevelDBIterator) DBKey() (*DBKey, error) {
 	}, nil
 }
 
-func (i *LevelDBIterator) GetEnvelopeByTopicsMap(topics map[types.TopicType]bool) ([]byte, error) {
+func (i *LevelDBIterator) GetEnvelopeByTopicsMap(topics map[wakutypes.TopicType]bool) ([]byte, error) {
 	rawValue := make([]byte, len(i.Value()))
 	copy(rawValue, i.Value())
 
@@ -66,9 +68,9 @@ func (i *LevelDBIterator) GetEnvelopeByBloomFilter(bloom []byte) ([]byte, error)
 			return nil, err
 		}
 	} else {
-		envelopeBloom = types.TopicToBloom(key.Topic())
+		envelopeBloom = wakutypes.TopicToBloom(key.Topic())
 	}
-	if !types.BloomFilterMatch(bloom, envelopeBloom) {
+	if !wakutypes.BloomFilterMatch(bloom, envelopeBloom) {
 		return nil, nil
 	}
 	return rawValue, nil
@@ -83,7 +85,7 @@ func NewLevelDB(dataDir string) (*LevelDB, error) {
 	// Open opens an existing leveldb database
 	db, err := leveldb.OpenFile(dataDir, nil)
 	if _, corrupted := err.(*errors.ErrCorrupted); corrupted {
-		log.Info("database is corrupted trying to recover", "path", dataDir)
+		logutils.ZapLogger().Info("database is corrupted trying to recover", zap.String("path", dataDir))
 		db, err = leveldb.RecoverFile(dataDir, nil)
 	}
 
@@ -97,6 +99,7 @@ func NewLevelDB(dataDir string) (*LevelDB, error) {
 	instance.updateArchivedEnvelopesCount()
 	// checking count on every insert is inefficient
 	go func() {
+		defer common.LogOnPanic()
 		for {
 			select {
 			case <-instance.done:
@@ -117,7 +120,7 @@ func (db *LevelDB) GetEnvelope(key *DBKey) ([]byte, error) {
 
 func (db *LevelDB) updateArchivedEnvelopesCount() {
 	if count, err := db.envelopesCount(); err != nil {
-		log.Warn("db query for envelopes count failed", "err", err)
+		logutils.ZapLogger().Warn("db query for envelopes count failed", zap.Error(err))
 	} else {
 		archivedEnvelopesGauge.WithLabelValues(db.name).Set(float64(count))
 	}
@@ -142,7 +145,7 @@ func (db *LevelDB) Prune(t time.Time, batchSize int) (int, error) {
 	defer recoverLevelDBPanics("Prune")
 
 	var zero types.Hash
-	var emptyTopic types.TopicType
+	var emptyTopic wakutypes.TopicType
 	kl := NewDBKey(0, emptyTopic, zero)
 	ku := NewDBKey(uint32(t.Unix()), emptyTopic, zero)
 	query := CursorQuery{
@@ -202,24 +205,24 @@ func (db *LevelDB) envelopesCount() (int, error) {
 }
 
 // SaveEnvelope stores an envelope in leveldb and increments the metrics
-func (db *LevelDB) SaveEnvelope(env types.Envelope) error {
+func (db *LevelDB) SaveEnvelope(env wakutypes.Envelope) error {
 	defer recoverLevelDBPanics("SaveEnvelope")
 
 	key := NewDBKey(env.Expiry()-env.TTL(), env.Topic(), env.Hash())
 	rawEnvelope, err := rlp.EncodeToBytes(env.Unwrap())
 	if err != nil {
-		log.Error(fmt.Sprintf("rlp.EncodeToBytes failed: %s", err))
+		logutils.ZapLogger().Error("rlp.EncodeToBytes failed", zap.Error(err))
 		archivedErrorsCounter.WithLabelValues(db.name).Inc()
 		return err
 	}
 
 	if err = db.ldb.Put(key.Bytes(), rawEnvelope, nil); err != nil {
-		log.Error(fmt.Sprintf("Writing to DB failed: %s", err))
+		logutils.ZapLogger().Error("writing to DB failed", zap.Error(err))
 		archivedErrorsCounter.WithLabelValues(db.name).Inc()
 	}
 	archivedEnvelopesGauge.WithLabelValues(db.name).Inc()
 	archivedEnvelopeSizeMeter.WithLabelValues(db.name).Observe(
-		float64(waku.EnvelopeHeaderLength + env.Size()))
+		float64(wakuv1common.EnvelopeHeaderLength + env.Size()))
 	return err
 }
 
@@ -236,7 +239,9 @@ func recoverLevelDBPanics(calleMethodName string) {
 	// Recover from possible goleveldb panics
 	if r := recover(); r != nil {
 		if errString, ok := r.(string); ok {
-			log.Error(fmt.Sprintf("recovered from panic in %s: %s", calleMethodName, errString))
+			logutils.ZapLogger().Error("recovered from panic",
+				zap.String("calleMethodName", calleMethodName),
+				zap.String("errString", errString))
 		}
 	}
 }

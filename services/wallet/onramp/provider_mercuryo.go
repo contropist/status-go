@@ -17,7 +17,7 @@ import (
 )
 
 const mercuryoID = "mercuryo"
-const mercuryioNoFeesBaseURL = "https://exchange.mercuryo.io/?type=buy&networks=ETHEREUM,ARBITRUM,OPTIMISM&currency=ETH"
+const mercuryioNoFeesBaseURL = "https://exchange.mercuryo.io/?type=buy&networks=ETHEREUM,ARBITRUM,OPTIMISM,BASE&currency=ETH"
 const supportedAssetsUpdateInterval = 24 * time.Hour
 
 type MercuryoProvider struct {
@@ -53,7 +53,7 @@ func (p *MercuryoProvider) GetCryptoOnRamp(ctx context.Context) (CryptoOnRamp, e
 		Hostname:                  "mercuryo.io",
 		SupportsSinglePurchase:    true,
 		SupportsRecurrentPurchase: true,
-		SupportedChainIDs:         []uint64{walletCommon.EthereumMainnet, walletCommon.ArbitrumMainnet, walletCommon.OptimismMainnet},
+		SupportedChainIDs:         []uint64{walletCommon.EthereumMainnet, walletCommon.ArbitrumMainnet, walletCommon.OptimismMainnet, walletCommon.BaseMainnet},
 		URLsNeedParameters:        true,
 		SiteURL:                   mercuryioNoFeesBaseURL,
 		RecurrentSiteURL:          mercuryioNoFeesBaseURL + "&widget_flow=recurrent",
@@ -122,7 +122,7 @@ func (p *MercuryoProvider) GetURL(ctx context.Context, parameters Parameters) (s
 		widgetSecret = "AZ5fmxmrgyrXH3zre6yHU2Vw9fPqEw82" // #nosec G101
 	)
 
-	if parameters.DestAddress == nil || *parameters.DestAddress == walletCommon.ZeroAddress {
+	if parameters.DestAddress == nil || *parameters.DestAddress == walletCommon.ZeroAddress() {
 		return "", errors.New("destination address is required")
 	}
 

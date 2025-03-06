@@ -32,8 +32,9 @@ import (
 
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/params"
-	waku "github.com/status-im/status-go/waku"
-	wakucommon "github.com/status-im/status-go/waku/common"
+	wakutypes "github.com/status-im/status-go/waku/types"
+	"github.com/status-im/status-go/wakuv1"
+	wakuv1common "github.com/status-im/status-go/wakuv1/common"
 )
 
 const powRequirement = 0.00001
@@ -43,7 +44,7 @@ var seed = time.Now().Unix()
 var testPayload = []byte("test payload")
 
 type ServerTestParams struct {
-	topic types.TopicType
+	topic wakutypes.TopicType
 	birth uint32
 	low   uint32
 	upp   uint32
@@ -58,14 +59,14 @@ func TestMailserverSuite(t *testing.T) {
 type MailserverSuite struct {
 	suite.Suite
 	server  *WakuMailServer
-	shh     *waku.Waku
+	shh     *wakuv1.Waku
 	config  *params.WakuConfig
 	dataDir string
 }
 
 func (s *MailserverSuite) SetupTest() {
 	s.server = &WakuMailServer{}
-	s.shh = waku.New(&waku.DefaultConfig, nil)
+	s.shh = wakuv1.New(&wakuv1.DefaultConfig, nil)
 	s.shh.RegisterMailServer(s.server)
 
 	tmpDir := s.T().TempDir()
@@ -112,7 +113,7 @@ func (s *MailserverSuite) TestInit() {
 		tc := testCase
 		s.T().Run(tc.info, func(*testing.T) {
 			mailServer := &WakuMailServer{}
-			shh := waku.New(&waku.DefaultConfig, nil)
+			shh := wakuv1.New(&wakuv1.DefaultConfig, nil)
 			shh.RegisterMailServer(mailServer)
 
 			err := mailServer.Init(shh, &tc.config)
@@ -148,7 +149,7 @@ func (s *MailserverSuite) TestArchive() {
 	s.NoError(err)
 
 	s.server.Archive(env)
-	key := NewDBKey(env.Expiry-env.TTL, types.TopicType(env.Topic), types.Hash(env.Hash()))
+	key := NewDBKey(env.Expiry-env.TTL, wakutypes.TopicType(env.Topic), types.Hash(env.Hash()))
 	archivedEnvelope, err := s.server.ms.db.GetEnvelope(key)
 	s.NoError(err)
 
@@ -171,7 +172,7 @@ func (s *MailserverSuite) TestManageLimits() {
 
 func (s *MailserverSuite) TestDBKey() {
 	var h types.Hash
-	var emptyTopic types.TopicType
+	var emptyTopic wakutypes.TopicType
 	i := uint32(time.Now().Unix())
 	k := NewDBKey(i, emptyTopic, h)
 	s.Equal(len(k.Bytes()), DBKeyLength, "wrong DB key length")
@@ -184,7 +185,7 @@ func (s *MailserverSuite) TestRequestPaginationLimit() {
 	defer s.server.Close()
 
 	var (
-		sentEnvelopes  []*wakucommon.Envelope
+		sentEnvelopes  []*wakuv1common.Envelope
 		sentHashes     []common.Hash
 		receivedHashes []common.Hash
 		archiveKeys    []string
@@ -198,7 +199,7 @@ func (s *MailserverSuite) TestRequestPaginationLimit() {
 		env, err := generateEnvelope(sentTime)
 		s.NoError(err)
 		s.server.Archive(env)
-		key := NewDBKey(env.Expiry-env.TTL, types.TopicType(env.Topic), types.Hash(env.Hash()))
+		key := NewDBKey(env.Expiry-env.TTL, wakutypes.TopicType(env.Topic), types.Hash(env.Hash()))
 		archiveKeys = append(archiveKeys, fmt.Sprintf("%x", key.Cursor()))
 		sentEnvelopes = append(sentEnvelopes, env)
 		sentHashes = append(sentHashes, env.Hash())
@@ -313,7 +314,7 @@ func (s *MailserverSuite) TestMailServer() {
 				s.Equal(tc.params.low, payload.Lower)
 				s.Equal(tc.params.upp, payload.Upper)
 				s.Equal(tc.params.limit, payload.Limit)
-				s.Equal(types.TopicToBloom(tc.params.topic), payload.Bloom)
+				s.Equal(wakutypes.TopicToBloom(tc.params.topic), payload.Bloom)
 				s.Equal(tc.expect, s.messageExists(env, tc.params.low, tc.params.upp, payload.Bloom, tc.params.limit))
 
 				src[0]++
@@ -345,7 +346,7 @@ func (s *MailserverSuite) TestDecodeRequest() {
 	srcKey, err := s.shh.GetPrivateKey(id)
 	s.Require().NoError(err)
 
-	env := s.createEnvelope(types.TopicType{0x01}, data, srcKey)
+	env := s.createEnvelope(wakutypes.TopicType{0x01}, data, srcKey)
 
 	decodedPayload, err := s.server.decodeRequest(nil, env)
 	s.Require().NoError(err)
@@ -371,7 +372,7 @@ func (s *MailserverSuite) TestDecodeRequestNoUpper() {
 	srcKey, err := s.shh.GetPrivateKey(id)
 	s.Require().NoError(err)
 
-	env := s.createEnvelope(types.TopicType{0x01}, data, srcKey)
+	env := s.createEnvelope(wakutypes.TopicType{0x01}, data, srcKey)
 
 	decodedPayload, err := s.server.decodeRequest(nil, env)
 	s.Require().NoError(err)
@@ -382,7 +383,7 @@ func (s *MailserverSuite) TestProcessRequestDeadlockHandling() {
 	s.setupServer(s.server)
 	defer s.server.Close()
 
-	var archievedEnvelopes []*wakucommon.Envelope
+	var archievedEnvelopes []*wakuv1common.Envelope
 
 	now := time.Now()
 	count := uint32(10)
@@ -476,7 +477,7 @@ func (s *MailserverSuite) TestProcessRequestDeadlockHandling() {
 	}
 }
 
-func (s *MailserverSuite) messageExists(envelope *wakucommon.Envelope, low, upp uint32, bloom []byte, limit uint32) bool {
+func (s *MailserverSuite) messageExists(envelope *wakuv1common.Envelope, low, upp uint32, bloom []byte, limit uint32) bool {
 	receivedHashes, _, _ := processRequestAndCollectHashes(s.server, MessagesRequestPayload{
 		Lower: low,
 		Upper: upp,
@@ -494,7 +495,7 @@ func (s *MailserverSuite) messageExists(envelope *wakucommon.Envelope, low, upp 
 func (s *MailserverSuite) setupServer(server *WakuMailServer) {
 	const password = "password_for_this_test"
 
-	s.shh = waku.New(&waku.DefaultConfig, nil)
+	s.shh = wakuv1.New(&wakuv1.DefaultConfig, nil)
 	s.shh.RegisterMailServer(server)
 
 	err := server.Init(s.shh, &params.WakuConfig{
@@ -512,8 +513,8 @@ func (s *MailserverSuite) setupServer(server *WakuMailServer) {
 	}
 }
 
-func (s *MailserverSuite) prepareRequest(envelopes []*wakucommon.Envelope, limit uint32) (
-	[]byte, *wakucommon.Envelope, error,
+func (s *MailserverSuite) prepareRequest(envelopes []*wakuv1common.Envelope, limit uint32) (
+	[]byte, *wakuv1common.Envelope, error,
 ) {
 	if len(envelopes) == 0 {
 		return nil, nil, errors.New("envelopes is empty")
@@ -532,7 +533,7 @@ func (s *MailserverSuite) prepareRequest(envelopes []*wakucommon.Envelope, limit
 	return peerID, request, nil
 }
 
-func (s *MailserverSuite) defaultServerParams(env *wakucommon.Envelope) *ServerTestParams {
+func (s *MailserverSuite) defaultServerParams(env *wakuv1common.Envelope) *ServerTestParams {
 	id, err := s.shh.NewKeyPair()
 	if err != nil {
 		s.T().Fatalf("failed to generate new key pair with seed %d: %s.", seed, err)
@@ -544,7 +545,7 @@ func (s *MailserverSuite) defaultServerParams(env *wakucommon.Envelope) *ServerT
 	birth := env.Expiry - env.TTL
 
 	return &ServerTestParams{
-		topic: types.TopicType(env.Topic),
+		topic: wakutypes.TopicType(env.Topic),
 		birth: birth,
 		low:   birth - 1,
 		upp:   birth + 1,
@@ -553,8 +554,8 @@ func (s *MailserverSuite) defaultServerParams(env *wakucommon.Envelope) *ServerT
 	}
 }
 
-func (s *MailserverSuite) createRequest(p *ServerTestParams) *wakucommon.Envelope {
-	bloom := types.TopicToBloom(p.topic)
+func (s *MailserverSuite) createRequest(p *ServerTestParams) *wakuv1common.Envelope {
+	bloom := wakutypes.TopicToBloom(p.topic)
 	data := make([]byte, 8)
 	binary.BigEndian.PutUint32(data, p.low)
 	binary.BigEndian.PutUint32(data[4:], p.upp)
@@ -569,22 +570,22 @@ func (s *MailserverSuite) createRequest(p *ServerTestParams) *wakucommon.Envelop
 	return s.createEnvelope(p.topic, data, p.key)
 }
 
-func (s *MailserverSuite) createEnvelope(topic types.TopicType, data []byte, srcKey *ecdsa.PrivateKey) *wakucommon.Envelope {
+func (s *MailserverSuite) createEnvelope(topic wakutypes.TopicType, data []byte, srcKey *ecdsa.PrivateKey) *wakuv1common.Envelope {
 	key, err := s.shh.GetSymKey(keyID)
 	if err != nil {
 		s.T().Fatalf("failed to retrieve sym key with seed %d: %s.", seed, err)
 	}
 
-	params := &wakucommon.MessageParams{
+	params := &wakuv1common.MessageParams{
 		KeySym:   key,
-		Topic:    wakucommon.TopicType(topic),
+		Topic:    wakuv1common.TopicType(topic),
 		Payload:  data,
 		PoW:      powRequirement * 2,
 		WorkTime: 2,
 		Src:      srcKey,
 	}
 
-	msg, err := wakucommon.NewSentMessage(params)
+	msg, err := wakuv1common.NewSentMessage(params)
 	if err != nil {
 		s.T().Fatalf("failed to create new message with seed %d: %s.", seed, err)
 	}
@@ -596,9 +597,9 @@ func (s *MailserverSuite) createEnvelope(topic types.TopicType, data []byte, src
 	return env
 }
 
-func generateEnvelopeWithKeys(sentTime time.Time, keySym []byte, keyAsym *ecdsa.PublicKey) (*wakucommon.Envelope, error) {
-	params := &wakucommon.MessageParams{
-		Topic:    wakucommon.TopicType{0x1F, 0x7E, 0xA1, 0x7F},
+func generateEnvelopeWithKeys(sentTime time.Time, keySym []byte, keyAsym *ecdsa.PublicKey) (*wakuv1common.Envelope, error) {
+	params := &wakuv1common.MessageParams{
+		Topic:    wakuv1common.TopicType{0x1F, 0x7E, 0xA1, 0x7F},
 		Payload:  testPayload,
 		PoW:      powRequirement,
 		WorkTime: 2,
@@ -610,7 +611,7 @@ func generateEnvelopeWithKeys(sentTime time.Time, keySym []byte, keyAsym *ecdsa.
 		params.Dst = keyAsym
 	}
 
-	msg, err := wakucommon.NewSentMessage(params)
+	msg, err := wakuv1common.NewSentMessage(params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create new message with seed %d: %s", seed, err)
 	}
@@ -622,7 +623,7 @@ func generateEnvelopeWithKeys(sentTime time.Time, keySym []byte, keyAsym *ecdsa.
 	return env, nil
 }
 
-func generateEnvelope(sentTime time.Time) (*wakucommon.Envelope, error) {
+func generateEnvelope(sentTime time.Time) (*wakuv1common.Envelope, error) {
 	h := crypto.Keccak256Hash([]byte("test sample data"))
 	return generateEnvelopeWithKeys(sentTime, h[:], nil)
 }
@@ -637,7 +638,7 @@ func processRequestAndCollectHashes(server *WakuMailServer, payload MessagesRequ
 	go func() {
 		for bundle := range bundles {
 			for _, rawEnvelope := range bundle {
-				var env *wakucommon.Envelope
+				var env *wakuv1common.Envelope
 				if err := rlp.DecodeBytes(rawEnvelope, &env); err != nil {
 					panic(err)
 				}

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/event"
@@ -331,9 +331,18 @@ func Test_removeTokenBalanceOnEventAccountRemoved(t *testing.T) {
 	txServiceMockCtrl := gomock.NewController(t)
 	server, _ := fake.NewTestServer(txServiceMockCtrl)
 	client := gethrpc.DialInProc(server)
-	rpcClient, _ := rpc.NewClient(client, chainID, params.UpstreamRPCConfig{}, nil, appDB, nil)
+
+	config := rpc.ClientConfig{
+		Client:          client,
+		UpstreamChainID: chainID,
+		Networks:        nil,
+		DB:              appDB,
+		WalletFeed:      nil,
+	}
+	rpcClient, _ := rpc.NewClient(config)
+
 	rpcClient.UpstreamChainID = chainID
-	nm := network.NewManager(appDB)
+	nm := network.NewManager(appDB, nil, nil, nil)
 	mediaServer, err := mediaserver.NewMediaServer(appDB, nil, nil, walletDB)
 	require.NoError(t, err)
 
@@ -397,7 +406,7 @@ func Test_tokensListsValidity(t *testing.T) {
 	accountsDB, err := accounts.NewDB(appDB)
 	require.NoError(t, err)
 
-	nm := network.NewManager(appDB)
+	nm := network.NewManager(appDB, nil, nil, nil)
 
 	manager := NewTokenManager(walletDB, nil, nil, nm, appDB, nil, nil, nil, accountsDB, NewPersistence(walletDB))
 	require.NotNil(t, manager)
@@ -410,7 +419,7 @@ func Test_tokensListsValidity(t *testing.T) {
 	tmpMap := make(map[string][]*Token)
 	for _, list := range allLists {
 		for _, token := range list.Tokens {
-			key := fmt.Sprintf("%d-%s", token.ChainID, token.Symbol)
+			key := fmt.Sprintf("%d-%s", token.ChainID, token.Address)
 			if added, ok := tmpMap[key]; ok {
 				found := false
 				for _, a := range added {
@@ -420,7 +429,7 @@ func Test_tokensListsValidity(t *testing.T) {
 					}
 				}
 
-				require.True(t, found)
+				require.True(t, found, "Token %s not found in list %s", token.Symbol, list.Name)
 			} else {
 				tmpMap[key] = []*Token{token}
 			}

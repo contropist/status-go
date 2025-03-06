@@ -8,14 +8,15 @@ import (
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/zap"
 
-	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/multiaccounts/settings"
 	"github.com/status-im/status-go/params"
 	"github.com/status-im/status-go/protocol/encryption/multidevice"
 	"github.com/status-im/status-go/protocol/tt"
 	"github.com/status-im/status-go/services/stickers"
-	"github.com/status-im/status-go/waku"
+	"github.com/status-im/status-go/wakuv1"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 var (
@@ -66,7 +67,7 @@ type MessengerSyncSettingsSuite struct {
 	alice2 *Messenger
 	// If one wants to send messages between different instances of Messenger,
 	// a single Waku service should be shared.
-	shh    types.Waku
+	shh    wakutypes.Waku
 	logger *zap.Logger
 
 	ignoreTests bool
@@ -79,10 +80,10 @@ func (s *MessengerSyncSettingsSuite) SetupSuite() {
 func (s *MessengerSyncSettingsSuite) SetupTest() {
 	s.logger = tt.MustCreateTestLogger()
 
-	config := waku.DefaultConfig
+	config := wakuv1.DefaultConfig
 	config.MinimumAcceptedPoW = 0
-	shh := waku.New(&config, s.logger)
-	s.shh = gethbridge.NewGethWakuWrapper(shh)
+	shh := wakuv1.New(&config, s.logger)
+	s.shh = shh
 	s.Require().NoError(shh.Start())
 
 	s.alice = s.newMessenger()

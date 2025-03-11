@@ -97,9 +97,9 @@ class WakuextService(Service):
         response = self.rpc_request("chatMessages", params)
         return response.json()
 
-    def message_by_message_id(self, message_id: str):
+    def message_by_message_id(self, message_id: str, skip_validation=False):
         params = [message_id]
-        response = self.rpc_request("messageByMessageID", params)
+        response = self.rpc_request("messageByMessageID", params, skip_validation=skip_validation)
         return response.json()
 
     def all_messages_from_chat_which_match_term(self, chat_id: str, searchTerm: str, caseSensitive: bool):
@@ -125,4 +125,39 @@ class WakuextService(Service):
     def status_updates(self):
         params = []
         response = self.rpc_request("statusUpdates", params)
+        return response.json()
+
+    def edit_message(self, message_id: str, new_text: str):
+        params = [{"id": message_id, "text": new_text}]
+        response = self.rpc_request("editMessage", params)
+        return response.json()
+
+    def delete_message(self, message_id: str):
+        params = [message_id]
+        response = self.rpc_request("deleteMessage", params)
+        return response.json()
+
+    def delete_messages_by_chat_id(self, chat_id: str):
+        params = [chat_id]
+        response = self.rpc_request("deleteMessagesByChatID", params)
+        return response.json()
+
+    def delete_message_and_send(self, message_id: str):
+        params = [message_id]
+        response = self.rpc_request("deleteMessageAndSend", params)
+        return response.json()
+
+    def delete_message_for_me_and_sync(self, localChatID: str, message_id: str):
+        params = [localChatID, message_id]
+        response = self.rpc_request("deleteMessageForMeAndSync", params)
+        return response.json()
+
+    def mark_message_as_unread(self, chat_id: str, message_id: str):
+        params = [chat_id, message_id]
+        response = self.rpc_request("markMessageAsUnread", params)
+        return response.json()
+
+    def first_unseen_message_id(self, chat_id: str):
+        params = [chat_id]
+        response = self.rpc_request("firstUnseenMessageID", params)
         return response.json()

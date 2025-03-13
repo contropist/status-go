@@ -420,8 +420,11 @@ func (w *Waku) getDiscV5BootstrapNodes(ctx context.Context, addresses []string, 
 				defer gocommon.LogOnPanic()
 				defer wg.Done()
 				if err := w.dnsDiscover(ctx, addr, retrieveENR, useOnlyDnsDiscCache); err != nil {
+					// prevent w.ctx in retryDnsDiscoveryWithBackoff from set to nil when w.Stop() is called
+					w.wg.Add(1)
 					go func() {
 						defer gocommon.LogOnPanic()
+						defer w.wg.Done()
 						w.retryDnsDiscoveryWithBackoff(ctx, addr, w.dnsDiscAsyncRetrievedSignal)
 					}()
 				}

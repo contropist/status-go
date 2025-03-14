@@ -17,7 +17,7 @@ from clients.services.wallet import WalletService
 from clients.services.wakuext import WakuextService
 from clients.services.accounts import AccountService
 from clients.services.settings import SettingsService
-from clients.signals import SignalClient, SignalType
+from clients.signals import SignalClient
 from clients.rpc import RpcClient
 from conftest import option
 from resources.constants import USE_IPV6, user_1, DEFAULT_DISPLAY_NAME, USER_DIR
@@ -30,13 +30,15 @@ class StatusBackend(RpcClient, SignalClient):
 
     container = None
 
-    def __init__(self, await_signals=[], privileged=False, ipv6=USE_IPV6):
+    def __init__(self, await_signals=[], privileged=False, ipv6=USE_IPV6, status_backend_url=""):
         self.ipv6 = True if ipv6 == "Yes" else False
         logging.info(f"Flag USE_IPV6 is: {self.ipv6}")
         self.docker_project_name = option.docker_project_name
         self.network_name = f"{self.docker_project_name}_default"
         if option.status_backend_url:
             url = option.status_backend_url
+        elif status_backend_url != "":
+            url = status_backend_url
         else:
             self.docker_client = docker.from_env()
             retries = 5
@@ -231,7 +233,7 @@ class StatusBackend(RpcClient, SignalClient):
 
         data = self._set_proxy_credentials(data)
         resp = self.api_valid_request(method, data)
-        self.node_login_event = self.find_signal_containing_pattern(SignalType.NODE_LOGIN.value, event_pattern=self.display_name)
+        self.node_login_event = self.wait_for_login()
         return resp
 
     def restore_account_and_login(
@@ -390,3 +392,14 @@ class StatusBackend(RpcClient, SignalClient):
 
         except Exception as e:
             raise RuntimeError(f"Failed to change container IP: {e}")
+
+    def wait_for_online(self, timeout=10):
+        start_time = time.time()
+        while time.time() - start_time <= timeout:
+            response = self.wakuext_service.peers(enable_logging=False)
+            if len(response["result"].keys()) == 0:
+                time.sleep(0.5)
+                continue
+            logging.info(f"StatusBackend is online after {time.time() - start_time} seconds")
+            return
+        raise TimeoutError(f"StatusBackend was not online after {timeout} seconds")

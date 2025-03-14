@@ -580,6 +580,10 @@ func (b *StatusNode) timeSource() *timesource.NTPTimeSource {
 
 	if b.timeSourceSrvc == nil {
 		b.timeSourceSrvc = timesource.Default()
+		go func() {
+			defer common.LogOnPanic()
+			b.timeSourceSrvc.Start()
+		}()
 	}
 	return b.timeSourceSrvc
 }

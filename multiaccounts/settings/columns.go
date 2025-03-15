@@ -392,11 +392,6 @@ var (
 		dBColumnName:   "test_networks_enabled",
 		valueHandler:   BoolHandler,
 	}
-	IsGoerliEnabled = SettingField{
-		reactFieldName: "is-goerli-enabled?",
-		dBColumnName:   "is_goerli_enabled",
-		valueHandler:   BoolHandler,
-	}
 	TokenGroupByCommunity = SettingField{
 		reactFieldName: "token-group-by-community?",
 		dBColumnName:   "wallet_token_preferences_group_by_community",
@@ -496,11 +491,6 @@ var (
 			protobufType:      protobuf.SyncSetting_URL_UNFURLING_MODE,
 		},
 	}
-	OmitTransfersHistoryScan = SettingField{
-		reactFieldName: "omit-transfers-history-scan",
-		dBColumnName:   "omit_transfers_history_scan",
-		valueHandler:   BoolHandler,
-	}
 	MnemonicWasNotShown = SettingField{
 		reactFieldName: "mnemonic-was-not-shown?",
 		dBColumnName:   "mnemonic_was_not_shown",
@@ -537,7 +527,6 @@ var (
 		GifFavourites,
 		GifRecents,
 		HideHomeTooltip,
-		IsGoerliEnabled,
 		KeycardInstanceUID,
 		KeycardPairedOn,
 		KeycardPairing,

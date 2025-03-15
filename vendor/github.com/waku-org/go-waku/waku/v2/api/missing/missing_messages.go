@@ -11,16 +11,19 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/waku-org/go-waku/logging"
+	"github.com/waku-org/go-waku/waku/v2/api/common"
 	"github.com/waku-org/go-waku/waku/v2/protocol"
 	"github.com/waku-org/go-waku/waku/v2/protocol/pb"
-	"github.com/waku-org/go-waku/waku/v2/protocol/store"
+	storepb "github.com/waku-org/go-waku/waku/v2/protocol/store/pb"
 	"github.com/waku-org/go-waku/waku/v2/timesource"
+	"github.com/waku-org/go-waku/waku/v2/utils"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
 
 const maxContentTopicsPerRequest = 10
 const maxMsgHashesPerRequest = 50
+const messageFetchPageSize = 100
 
 // MessageTracker should keep track of messages it has seen before and
 // provide a way to determine whether a message exists or not. This
@@ -32,22 +35,25 @@ type MessageTracker interface {
 // MissingMessageVerifier is used to periodically retrieve missing messages from store nodes that have some specific criteria
 type MissingMessageVerifier struct {
 	ctx    context.Context
+	cancel context.CancelFunc
 	params missingMessageVerifierParams
 
-	messageTracker MessageTracker
+	storenodeRequestor common.StorenodeRequestor
+	messageTracker     MessageTracker
 
-	criteriaInterest   map[string]criteriaInterest // Track message verification requests and when was the last time a pubsub topic was verified for missing messages
+	criteriaInterest   map[string]*criteriaInterest // Track message verification requests and when was the last time a pubsub topic was verified for missing messages
 	criteriaInterestMu sync.RWMutex
 
-	C <-chan *protocol.Envelope
+	C chan *protocol.Envelope
 
-	store      *store.WakuStore
-	timesource timesource.Timesource
-	logger     *zap.Logger
+	timesource   timesource.Timesource
+	logger       *zap.Logger
+	isRunning    bool
+	runningMutex sync.RWMutex
 }
 
 // NewMissingMessageVerifier creates an instance of a MissingMessageVerifier
-func NewMissingMessageVerifier(store *store.WakuStore, messageTracker MessageTracker, timesource timesource.Timesource, logger *zap.Logger, options ...MissingMessageVerifierOption) *MissingMessageVerifier {
+func NewMissingMessageVerifier(storenodeRequester common.StorenodeRequestor, messageTracker MessageTracker, timesource timesource.Timesource, logger *zap.Logger, options ...MissingMessageVerifierOption) *MissingMessageVerifier {
 	options = append(defaultMissingMessagesVerifierOptions, options...)
 	params := missingMessageVerifierParams{}
 	for _, opt := range options {
@@ -55,11 +61,13 @@ func NewMissingMessageVerifier(store *store.WakuStore, messageTracker MessageTra
 	}
 
 	return &MissingMessageVerifier{
-		store:          store,
-		timesource:     timesource,
-		messageTracker: messageTracker,
-		logger:         logger.Named("missing-msg-verifier"),
-		params:         params,
+		storenodeRequestor: storenodeRequester,
+		timesource:         timesource,
+		messageTracker:     messageTracker,
+		logger:             logger.Named("missing-msg-verifier"),
+		params:             params,
+		criteriaInterest:   make(map[string]*criteriaInterest),
+		C:                  make(chan *protocol.Envelope, 1000),
 	}
 }
 
@@ -91,17 +99,39 @@ func (m *MissingMessageVerifier) SetCriteriaInterest(peerID peer.ID, contentFilt
 		currMessageVerificationRequest.cancel()
 	}
 
-	m.criteriaInterest[contentFilter.PubsubTopic] = criteriaInterest
+	m.criteriaInterest[contentFilter.PubsubTopic] = &criteriaInterest
+}
+
+func (m *MissingMessageVerifier) setRunning(running bool) {
+	m.runningMutex.Lock()
+	defer m.runningMutex.Unlock()
+	m.isRunning = running
 }
 
 func (m *MissingMessageVerifier) Start(ctx context.Context) {
-	m.ctx = ctx
-	m.criteriaInterest = make(map[string]criteriaInterest)
+	m.runningMutex.Lock()
+	if m.isRunning { //make sure verifier only runs once.
+		m.runningMutex.Unlock()
+		return
+	}
+	m.isRunning = true
+	m.runningMutex.Unlock()
 
-	c := make(chan *protocol.Envelope, 1000)
-	m.C = c
+	ctx, cancelFunc := context.WithCancel(ctx)
+	m.ctx = ctx
+	m.cancel = cancelFunc
+
+	// updating context for existing criteria
+	m.criteriaInterestMu.Lock()
+	for _, value := range m.criteriaInterest {
+		ctx, cancel := context.WithCancel(m.ctx)
+		value.ctx = ctx
+		value.cancel = cancel
+	}
+	m.criteriaInterestMu.Unlock()
 
 	go func() {
+		defer utils.LogOnPanic()
 		t := time.NewTicker(m.params.interval)
 		defer t.Stop()
 
@@ -113,27 +143,37 @@ func (m *MissingMessageVerifier) Start(ctx context.Context) {
 				m.criteriaInterestMu.RLock()
 				critIntList := make([]criteriaInterest, 0, len(m.criteriaInterest))
 				for _, value := range m.criteriaInterest {
-					critIntList = append(critIntList, value)
+					critIntList = append(critIntList, *value)
 				}
 				m.criteriaInterestMu.RUnlock()
 				for _, interest := range critIntList {
 					select {
 					case <-ctx.Done():
+						m.setRunning(false)
 						return
 					default:
 						semaphore <- struct{}{}
 						go func(interest criteriaInterest) {
-							m.fetchHistory(c, interest)
+							defer utils.LogOnPanic()
+							m.fetchHistory(m.C, interest)
 							<-semaphore
 						}(interest)
 					}
 				}
 
 			case <-ctx.Done():
+				m.setRunning(false)
 				return
 			}
 		}
 	}()
+}
+
+func (m *MissingMessageVerifier) Stop() {
+	m.cancel()
+	m.runningMutex.Lock()
+	defer m.runningMutex.Unlock()
+	m.isRunning = false
 }
 
 func (m *MissingMessageVerifier) fetchHistory(c chan<- *protocol.Envelope, interest criteriaInterest) {
@@ -142,6 +182,13 @@ func (m *MissingMessageVerifier) fetchHistory(c chan<- *protocol.Envelope, inter
 		j := i + maxContentTopicsPerRequest
 		if j > len(contentTopics) {
 			j = len(contentTopics)
+		}
+
+		select {
+		case <-interest.ctx.Done():
+			return
+		default:
+			// continue...
 		}
 
 		now := m.timesource.Now()
@@ -168,7 +215,7 @@ func (m *MissingMessageVerifier) fetchHistory(c chan<- *protocol.Envelope, inter
 	}
 }
 
-func (m *MissingMessageVerifier) storeQueryWithRetry(ctx context.Context, queryFunc func(ctx context.Context) (*store.Result, error), logger *zap.Logger, logMsg string) (*store.Result, error) {
+func (m *MissingMessageVerifier) storeQueryWithRetry(ctx context.Context, queryFunc func(ctx context.Context) (common.StoreRequestResult, error), logger *zap.Logger, logMsg string) (common.StoreRequestResult, error) {
 	retry := true
 	count := 1
 	for retry && count <= m.params.maxAttemptsToRetrieveHistory {
@@ -202,12 +249,21 @@ func (m *MissingMessageVerifier) fetchMessagesBatch(c chan<- *protocol.Envelope,
 		logging.Epoch("to", now),
 	)
 
-	result, err := m.storeQueryWithRetry(interest.ctx, func(ctx context.Context) (*store.Result, error) {
-		return m.store.Query(ctx, store.FilterCriteria{
-			ContentFilter: protocol.NewContentFilter(interest.contentFilter.PubsubTopic, contentTopics[batchFrom:batchTo]...),
-			TimeStart:     proto.Int64(interest.lastChecked.Add(-m.params.delay).UnixNano()),
-			TimeEnd:       proto.Int64(now.Add(-m.params.delay).UnixNano()),
-		}, store.WithPeer(interest.peerID), store.WithPaging(false, 100), store.IncludeData(false))
+	result, err := m.storeQueryWithRetry(interest.ctx, func(ctx context.Context) (common.StoreRequestResult, error) {
+		storeQueryRequest := &storepb.StoreQueryRequest{
+			RequestId:       hex.EncodeToString(protocol.GenerateRequestID()),
+			PubsubTopic:     &interest.contentFilter.PubsubTopic,
+			ContentTopics:   contentTopics[batchFrom:batchTo],
+			TimeStart:       proto.Int64(interest.lastChecked.Add(-m.params.delay).UnixNano()),
+			TimeEnd:         proto.Int64(now.Add(-m.params.delay).UnixNano()),
+			PaginationLimit: proto.Uint64(messageFetchPageSize),
+		}
+
+		return m.storenodeRequestor.Query(
+			ctx,
+			interest.peerID,
+			storeQueryRequest,
+		)
 	}, logger, "retrieving history to check for missing messages")
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
@@ -233,7 +289,7 @@ func (m *MissingMessageVerifier) fetchMessagesBatch(c chan<- *protocol.Envelope,
 			missingHashes = append(missingHashes, hash)
 		}
 
-		result, err = m.storeQueryWithRetry(interest.ctx, func(ctx context.Context) (*store.Result, error) {
+		result, err = m.storeQueryWithRetry(interest.ctx, func(ctx context.Context) (common.StoreRequestResult, error) {
 			if err = result.Next(ctx); err != nil {
 				return nil, err
 			}
@@ -260,14 +316,35 @@ func (m *MissingMessageVerifier) fetchMessagesBatch(c chan<- *protocol.Envelope,
 			j = len(missingHashes)
 		}
 
+		select {
+		case <-interest.ctx.Done():
+			return nil
+		default:
+			// continue...
+		}
+
 		wg.Add(1)
 		go func(messageHashes []pb.MessageHash) {
+			defer utils.LogOnPanic()
 			defer wg.Wait()
 
-			result, err := m.storeQueryWithRetry(interest.ctx, func(ctx context.Context) (*store.Result, error) {
+			result, err := m.storeQueryWithRetry(interest.ctx, func(ctx context.Context) (common.StoreRequestResult, error) {
 				queryCtx, cancel := context.WithTimeout(ctx, m.params.storeQueryTimeout)
 				defer cancel()
-				return m.store.QueryByHash(queryCtx, messageHashes, store.WithPeer(interest.peerID), store.WithPaging(false, maxMsgHashesPerRequest))
+
+				var messageHashesBytes [][]byte
+				for _, m := range messageHashes {
+					messageHashesBytes = append(messageHashesBytes, m.Bytes())
+				}
+
+				storeQueryRequest := &storepb.StoreQueryRequest{
+					RequestId:       hex.EncodeToString(protocol.GenerateRequestID()),
+					IncludeData:     true,
+					MessageHashes:   messageHashesBytes,
+					PaginationLimit: proto.Uint64(maxMsgHashesPerRequest),
+				}
+
+				return m.storenodeRequestor.Query(queryCtx, interest.peerID, storeQueryRequest)
 			}, logger, "retrieving missing messages")
 			if err != nil {
 				if !errors.Is(err, context.Canceled) {
@@ -285,7 +362,7 @@ func (m *MissingMessageVerifier) fetchMessagesBatch(c chan<- *protocol.Envelope,
 					}
 				}
 
-				result, err = m.storeQueryWithRetry(interest.ctx, func(ctx context.Context) (*store.Result, error) {
+				result, err = m.storeQueryWithRetry(interest.ctx, func(ctx context.Context) (common.StoreRequestResult, error) {
 					if err = result.Next(ctx); err != nil {
 						return nil, err
 					}

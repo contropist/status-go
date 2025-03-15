@@ -65,6 +65,7 @@ type RawMessage struct {
 	// don't wrap message into ProtocolMessage.
 	// when this is true, the message will not be resent via ResendTypeDataSync, but it's possible to
 	// resend it via ResendTypeRawMessage specified in ResendType
+	// MVDS only supports sending encrypted message.
 	SkipEncryptionLayer   bool
 	SendPushNotification  bool
 	MessageType           protobuf.ApplicationMetadataMessage_Type
@@ -79,6 +80,7 @@ type RawMessage struct {
 	Ephemeral             bool
 	BeforeDispatch        func(*RawMessage) error
 	HashRatchetGroupID    []byte
+	ContentTopic          string
 	PubsubTopic           string
 	ResendType            ResendType
 	ResendMethod          ResendMethod

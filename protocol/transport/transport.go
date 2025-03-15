@@ -1,28 +1,28 @@
 package transport
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"database/sql"
-	"encoding/hex"
-	"fmt"
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 	"golang.org/x/exp/maps"
 
-	"github.com/ethereum/go-ethereum/common"
+	"github.com/waku-org/go-waku/waku/v2/api/history"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/p2p/enode"
+	gocommon "github.com/status-im/status-go/common"
 	"github.com/status-im/status-go/connection"
 	"github.com/status-im/status-go/eth-node/crypto"
 	"github.com/status-im/status-go/eth-node/types"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 var (
@@ -31,7 +31,7 @@ var (
 )
 
 type transportKeysManager struct {
-	waku types.Waku
+	waku wakutypes.Waku
 
 	// Identity of the current user.
 	privateKey *ecdsa.PrivateKey
@@ -71,8 +71,8 @@ type Option func(*Transport) error
 
 // Transport is a transport based on Whisper service.
 type Transport struct {
-	waku        types.Waku
-	api         types.PublicWakuAPI // only PublicWakuAPI implements logic to send messages
+	waku        wakutypes.Waku
+	api         wakutypes.PublicWakuAPI // only PublicWakuAPI implements logic to send messages
 	keysManager *transportKeysManager
 	filters     *FiltersManager
 	logger      *zap.Logger
@@ -89,7 +89,7 @@ type Transport struct {
 //	there are no other chats. It may happen that we leave a private chat
 //	but still have a public chat for a given public key.
 func NewTransport(
-	waku types.Waku,
+	waku wakutypes.Waku,
 	privateKey *ecdsa.PrivateKey,
 	db *sql.DB,
 	sqlitePersistenceTableName string,
@@ -109,7 +109,7 @@ func NewTransport(
 		envelopesMonitor.Start()
 	}
 
-	var api types.PublicWhisperAPI
+	var api wakutypes.PublicWakuAPI
 	if waku != nil {
 		api = waku.PublicWakuAPI()
 	}
@@ -221,12 +221,12 @@ func (t *Transport) JoinGroup(publicKeys []*ecdsa.PublicKey) ([]*Filter, error) 
 	return filters, nil
 }
 
-func (t *Transport) GetStats() types.StatsSummary {
+func (t *Transport) GetStats() wakutypes.StatsSummary {
 	return t.waku.GetStats()
 }
 
-func (t *Transport) RetrieveRawAll() (map[Filter][]*types.Message, error) {
-	result := make(map[Filter][]*types.Message)
+func (t *Transport) RetrieveRawAll() (map[Filter][]*wakutypes.Message, error) {
+	result := make(map[Filter][]*wakutypes.Message)
 	logger := t.logger.With(zap.String("site", "retrieveRawAll"))
 
 	for _, filter := range t.filters.Filters() {
@@ -278,7 +278,7 @@ func (t *Transport) RetrieveRawAll() (map[Filter][]*types.Message, error) {
 // SendPublic sends a new message using the Whisper service.
 // For public filters, chat name is used as an ID as well as
 // a topic.
-func (t *Transport) SendPublic(ctx context.Context, newMessage *types.NewMessage, chatName string) ([]byte, error) {
+func (t *Transport) SendPublic(ctx context.Context, newMessage *wakutypes.NewMessage, chatName string) ([]byte, error) {
 	if err := t.addSig(newMessage); err != nil {
 		return nil, err
 	}
@@ -295,7 +295,7 @@ func (t *Transport) SendPublic(ctx context.Context, newMessage *types.NewMessage
 	return t.api.Post(ctx, *newMessage)
 }
 
-func (t *Transport) SendPrivateWithSharedSecret(ctx context.Context, newMessage *types.NewMessage, publicKey *ecdsa.PublicKey, secret []byte) ([]byte, error) {
+func (t *Transport) SendPrivateWithSharedSecret(ctx context.Context, newMessage *wakutypes.NewMessage, publicKey *ecdsa.PublicKey, secret []byte) ([]byte, error) {
 	if err := t.addSig(newMessage); err != nil {
 		return nil, err
 	}
@@ -316,7 +316,7 @@ func (t *Transport) SendPrivateWithSharedSecret(ctx context.Context, newMessage 
 	return t.api.Post(ctx, *newMessage)
 }
 
-func (t *Transport) SendPrivateWithPartitioned(ctx context.Context, newMessage *types.NewMessage, publicKey *ecdsa.PublicKey) ([]byte, error) {
+func (t *Transport) SendPrivateWithPartitioned(ctx context.Context, newMessage *wakutypes.NewMessage, publicKey *ecdsa.PublicKey) ([]byte, error) {
 	if err := t.addSig(newMessage); err != nil {
 		return nil, err
 	}
@@ -333,7 +333,7 @@ func (t *Transport) SendPrivateWithPartitioned(ctx context.Context, newMessage *
 	return t.api.Post(ctx, *newMessage)
 }
 
-func (t *Transport) SendPrivateOnPersonalTopic(ctx context.Context, newMessage *types.NewMessage, publicKey *ecdsa.PublicKey) ([]byte, error) {
+func (t *Transport) SendPrivateOnPersonalTopic(ctx context.Context, newMessage *wakutypes.NewMessage, publicKey *ecdsa.PublicKey) ([]byte, error) {
 	if err := t.addSig(newMessage); err != nil {
 		return nil, err
 	}
@@ -358,7 +358,7 @@ func (t *Transport) LoadKeyFilters(key *ecdsa.PrivateKey) (*Filter, error) {
 	return t.filters.LoadEphemeral(&key.PublicKey, key, true)
 }
 
-func (t *Transport) SendCommunityMessage(ctx context.Context, newMessage *types.NewMessage, publicKey *ecdsa.PublicKey) ([]byte, error) {
+func (t *Transport) SendCommunityMessage(ctx context.Context, newMessage *wakutypes.NewMessage, publicKey *ecdsa.PublicKey) ([]byte, error) {
 	if err := t.addSig(newMessage); err != nil {
 		return nil, err
 	}
@@ -380,7 +380,7 @@ func (t *Transport) cleanFilters() error {
 	return t.filters.RemoveNoListenFilters()
 }
 
-func (t *Transport) addSig(newMessage *types.NewMessage) error {
+func (t *Transport) addSig(newMessage *wakutypes.NewMessage) error {
 	sigID, err := t.keysManager.AddOrGetKeyPair(t.keysManager.privateKey)
 	if err != nil {
 		return err
@@ -389,11 +389,11 @@ func (t *Transport) addSig(newMessage *types.NewMessage) error {
 	return nil
 }
 
-func (t *Transport) Track(identifier []byte, hashes [][]byte, newMessages []*types.NewMessage) {
+func (t *Transport) Track(identifier []byte, hashes [][]byte, newMessages []*wakutypes.NewMessage) {
 	t.TrackMany([][]byte{identifier}, hashes, newMessages)
 }
 
-func (t *Transport) TrackMany(identifiers [][]byte, hashes [][]byte, newMessages []*types.NewMessage) {
+func (t *Transport) TrackMany(identifiers [][]byte, hashes [][]byte, newMessages []*wakutypes.NewMessage) {
 	if t.envelopesMonitor == nil {
 		return
 	}
@@ -436,6 +436,7 @@ func (t *Transport) cleanFiltersLoop() {
 
 	ticker := time.NewTicker(5 * time.Minute)
 	go func() {
+		defer gocommon.LogOnPanic()
 		for {
 			select {
 			case <-t.quit:
@@ -459,152 +460,8 @@ func (t *Transport) PeerCount() int {
 	return t.waku.PeerCount()
 }
 
-func (t *Transport) Peers() types.PeerStats {
+func (t *Transport) Peers() wakutypes.PeerStats {
 	return t.waku.Peers()
-}
-
-func (t *Transport) createMessagesRequestV1(
-	ctx context.Context,
-	peerID []byte,
-	from, to uint32,
-	previousCursor []byte,
-	topics []types.TopicType,
-	waitForResponse bool,
-) (cursor []byte, err error) {
-	r := createMessagesRequest(from, to, previousCursor, nil, "", topics, 1000)
-
-	events := make(chan types.EnvelopeEvent, 10)
-	sub := t.waku.SubscribeEnvelopeEvents(events)
-	defer sub.Unsubscribe()
-
-	err = t.waku.SendMessagesRequest(peerID, r)
-	if err != nil {
-		return
-	}
-
-	if !waitForResponse {
-		return
-	}
-
-	var resp *types.MailServerResponse
-	resp, err = t.waitForRequestCompleted(ctx, r.ID, events)
-	if err == nil && resp != nil && resp.Error != nil {
-		err = resp.Error
-	} else if err == nil && resp != nil {
-		cursor = resp.Cursor
-	}
-
-	return
-}
-
-func (t *Transport) createMessagesRequestV2(
-	ctx context.Context,
-	peerID []byte,
-	from, to uint32,
-	previousStoreCursor types.StoreRequestCursor,
-	pubsubTopic string,
-	contentTopics []types.TopicType,
-	limit uint32,
-	waitForResponse bool,
-	processEnvelopes bool,
-) (storeCursor types.StoreRequestCursor, envelopesCount int, err error) {
-	r := createMessagesRequest(from, to, nil, previousStoreCursor, pubsubTopic, contentTopics, limit)
-
-	if waitForResponse {
-		resultCh := make(chan struct {
-			storeCursor    types.StoreRequestCursor
-			envelopesCount int
-			err            error
-		})
-
-		go func() {
-			storeCursor, envelopesCount, err = t.waku.RequestStoreMessages(ctx, peerID, r, processEnvelopes)
-			resultCh <- struct {
-				storeCursor    types.StoreRequestCursor
-				envelopesCount int
-				err            error
-			}{storeCursor, envelopesCount, err}
-		}()
-
-		select {
-		case result := <-resultCh:
-			return result.storeCursor, result.envelopesCount, result.err
-		case <-ctx.Done():
-			return nil, 0, ctx.Err()
-		}
-	} else {
-		go func() {
-			_, _, err = t.waku.RequestStoreMessages(ctx, peerID, r, false)
-			if err != nil {
-				t.logger.Error("failed to request store messages", zap.Error(err))
-			}
-		}()
-	}
-
-	return
-}
-
-func (t *Transport) SendMessagesRequestForTopics(
-	ctx context.Context,
-	peerID []byte,
-	from, to uint32,
-	previousCursor []byte,
-	previousStoreCursor types.StoreRequestCursor,
-	pubsubTopic string,
-	contentTopics []types.TopicType,
-	limit uint32,
-	waitForResponse bool,
-	processEnvelopes bool,
-) (cursor []byte, storeCursor types.StoreRequestCursor, envelopesCount int, err error) {
-	switch t.waku.Version() {
-	case 2:
-		storeCursor, envelopesCount, err = t.createMessagesRequestV2(ctx, peerID, from, to, previousStoreCursor, pubsubTopic, contentTopics, limit, waitForResponse, processEnvelopes)
-	case 1:
-		cursor, err = t.createMessagesRequestV1(ctx, peerID, from, to, previousCursor, contentTopics, waitForResponse)
-	default:
-		err = fmt.Errorf("unsupported version %d", t.waku.Version())
-	}
-	return
-}
-
-func createMessagesRequest(from, to uint32, cursor []byte, storeCursor types.StoreRequestCursor, pubsubTopic string, topics []types.TopicType, limit uint32) types.MessagesRequest {
-	aUUID := uuid.New()
-	// uuid is 16 bytes, converted to hex it's 32 bytes as expected by types.MessagesRequest
-	id := []byte(hex.EncodeToString(aUUID[:]))
-	var topicBytes [][]byte
-	for idx := range topics {
-		topicBytes = append(topicBytes, topics[idx][:])
-	}
-	return types.MessagesRequest{
-		ID:            id,
-		From:          from,
-		To:            to,
-		Limit:         limit,
-		Cursor:        cursor,
-		PubsubTopic:   pubsubTopic,
-		ContentTopics: topicBytes,
-		StoreCursor:   storeCursor,
-	}
-}
-
-func (t *Transport) waitForRequestCompleted(ctx context.Context, requestID []byte, events chan types.EnvelopeEvent) (*types.MailServerResponse, error) {
-	for {
-		select {
-		case ev := <-events:
-			if !bytes.Equal(ev.Hash.Bytes(), requestID) {
-				continue
-			}
-			if ev.Event != types.EventMailServerRequestCompleted {
-				continue
-			}
-			data, ok := ev.Data.(*types.MailServerResponse)
-			if ok {
-				return data, nil
-			}
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
 }
 
 // ConfirmMessagesProcessed marks the messages as processed in the cache so
@@ -653,16 +510,12 @@ func (t *Transport) ListenAddresses() ([]multiaddr.Multiaddr, error) {
 	return t.waku.ListenAddresses()
 }
 
-func (t *Transport) RelayPeersByTopic(topic string) (*types.PeerList, error) {
+func (t *Transport) RelayPeersByTopic(topic string) (*wakutypes.PeerList, error) {
 	return t.waku.RelayPeersByTopic(topic)
 }
 
 func (t *Transport) ENR() (*enode.Node, error) {
 	return t.waku.ENR()
-}
-
-func (t *Transport) AddStorePeer(address multiaddr.Multiaddr) (peer.ID, error) {
-	return t.waku.AddStorePeer(address)
 }
 
 func (t *Transport) AddRelayPeer(address multiaddr.Multiaddr) (peer.ID, error) {
@@ -689,7 +542,7 @@ func (t *Transport) MarkP2PMessageAsProcessed(hash common.Hash) {
 	t.waku.MarkP2PMessageAsProcessed(hash)
 }
 
-func (t *Transport) SubscribeToConnStatusChanges() (*types.ConnStatusSubscription, error) {
+func (t *Transport) SubscribeToConnStatusChanges() (*wakutypes.ConnStatusSubscription, error) {
 	return t.waku.SubscribeToConnStatusChanges()
 }
 
@@ -743,16 +596,12 @@ func (t *Transport) ConfirmMessageDelivered(messageID string) {
 	t.waku.ConfirmMessageDelivered(commHashes)
 }
 
-func (t *Transport) SetStorePeerID(peerID peer.ID) {
-	t.waku.SetStorePeerID(peerID)
-}
-
 func (t *Transport) SetCriteriaForMissingMessageVerification(peerID peer.ID, filters []*Filter) {
 	if t.waku.Version() != 2 {
 		return
 	}
 
-	topicMap := make(map[string]map[types.TopicType]struct{})
+	topicMap := make(map[string]map[wakutypes.TopicType]struct{})
 	for _, f := range filters {
 		if !f.Listen || f.Ephemeral {
 			continue
@@ -760,7 +609,7 @@ func (t *Transport) SetCriteriaForMissingMessageVerification(peerID peer.ID, fil
 
 		_, ok := topicMap[f.PubsubTopic]
 		if !ok {
-			topicMap[f.PubsubTopic] = make(map[types.TopicType]struct{})
+			topicMap[f.PubsubTopic] = make(map[wakutypes.TopicType]struct{})
 		}
 
 		topicMap[f.PubsubTopic][f.ContentTopic] = struct{}{}
@@ -777,5 +626,54 @@ func (t *Transport) SetCriteriaForMissingMessageVerification(peerID peer.ID, fil
 				zap.Stringers("contentTopics", ctList))
 			return
 		}
+	}
+}
+
+func (t *Transport) GetActiveStorenode() peer.ID {
+	return t.waku.GetActiveStorenode()
+}
+
+func (t *Transport) DisconnectActiveStorenode(ctx context.Context, backoffReason time.Duration, shouldCycle bool) {
+	t.waku.DisconnectActiveStorenode(ctx, backoffReason, shouldCycle)
+}
+
+func (t *Transport) OnStorenodeChanged() <-chan peer.ID {
+	return t.waku.OnStorenodeChanged()
+}
+
+func (t *Transport) OnStorenodeNotWorking() <-chan struct{} {
+	return t.waku.OnStorenodeNotWorking()
+}
+
+func (t *Transport) OnStorenodeAvailable() <-chan peer.ID {
+	return t.waku.OnStorenodeAvailable()
+}
+
+func (t *Transport) WaitForAvailableStoreNode(ctx context.Context) bool {
+	return t.waku.WaitForAvailableStoreNode(ctx)
+}
+
+func (t *Transport) IsStorenodeAvailable(peerID peer.ID) bool {
+	return t.waku.IsStorenodeAvailable(peerID)
+}
+
+func (t *Transport) PerformStorenodeTask(fn func() error, opts ...history.StorenodeTaskOption) error {
+	return t.waku.PerformStorenodeTask(fn, opts...)
+}
+
+func (t *Transport) ProcessMailserverBatch(
+	ctx context.Context,
+	batch wakutypes.MailserverBatch,
+	storenodeID peer.ID,
+	pageLimit uint64,
+	shouldProcessNextPage func(int) (bool, uint64),
+	processEnvelopes bool,
+) error {
+	return t.waku.ProcessMailserverBatch(ctx, batch, storenodeID, pageLimit, shouldProcessNextPage, processEnvelopes)
+}
+
+func (t *Transport) SetStorenodeConfigProvider(c history.StorenodeConfigProvider) {
+	if t.WakuVersion() == 2 {
+		t.waku.SetStorenodeConfigProvider(c)
 	}
 }

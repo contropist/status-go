@@ -11,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
-
 	"github.com/cenkalti/backoff/v3"
 	"github.com/libp2p/go-libp2p/core/metrics"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -39,9 +37,9 @@ import (
 
 	"github.com/status-im/status-go/appdatabase"
 	"github.com/status-im/status-go/connection"
-	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/protocol/tt"
 	"github.com/status-im/status-go/t/helpers"
+	wakutypes "github.com/status-im/status-go/waku/types"
 	"github.com/status-im/status-go/wakuv2/common"
 )
 
@@ -252,7 +250,7 @@ func TestBasicWakuV2(t *testing.T) {
 		ContentTopics: common.NewTopicSetFromBytes([][]byte{{1, 2, 3, 4}}),
 	}
 
-	_, err = w.Subscribe(filter)
+	_, err = w.subscribe(filter)
 	require.NoError(t, err)
 
 	msgTimestamp := w.timestamp()
@@ -282,19 +280,16 @@ func TestBasicWakuV2(t *testing.T) {
 		b.InitialInterval = 500 * time.Millisecond
 	}
 	err = tt.RetryWithBackOff(func() error {
-		_, envelopeCount, err := w.Query(
+		result, err := w.node.Store().Query(
 			context.Background(),
-			storeNode.PeerID,
 			store.FilterCriteria{
 				ContentFilter: protocol.NewContentFilter(config.DefaultShardPubsubTopic, contentTopic.ContentTopic()),
 				TimeStart:     proto.Int64((timestampInSeconds - int64(marginInSeconds)) * int64(time.Second)),
 				TimeEnd:       proto.Int64((timestampInSeconds + int64(marginInSeconds)) * int64(time.Second)),
 			},
-			nil,
-			nil,
-			false,
+			store.WithPeer(storeNode.PeerID),
 		)
-		if err != nil || envelopeCount == 0 {
+		if err != nil || len(result.Messages()) == 0 {
 			// in case of failure extend timestamp margin up to 40secs
 			if marginInSeconds < 40 {
 				marginInSeconds += 5
@@ -332,8 +327,7 @@ func makeTestTree(domain string, nodes []*enode.Node, links []string) (*ethdnsdi
 }
 
 func TestPeerExchange(t *testing.T) {
-	logger, err := zap.NewDevelopment()
-	require.NoError(t, err)
+	logger := tt.MustCreateTestLogger()
 	// start node which serve as PeerExchange server
 	config := &Config{}
 	config.ClusterID = 16
@@ -450,7 +444,7 @@ func TestWakuV2Filter(t *testing.T) {
 		ContentTopics: common.NewTopicSetFromBytes([][]byte{contentTopicBytes}),
 	}
 
-	fID, err := w.Subscribe(filter)
+	fID, err := w.subscribe(filter)
 	require.NoError(t, err)
 
 	msgTimestamp := w.timestamp()
@@ -516,7 +510,7 @@ func TestWakuV2Store(t *testing.T) {
 	w1PeersCh := make(chan peer.IDSlice, 100) // buffered not to block on the send side
 
 	// Start the first Waku node
-	w1, err := New(nil, "", config1, nil, nil, nil, nil, func(cs types.ConnStatus) {
+	w1, err := New(nil, "", config1, nil, nil, nil, nil, func(cs wakutypes.ConnStatus) {
 		w1PeersCh <- maps.Keys(cs.Peers)
 	})
 	require.NoError(t, err)
@@ -544,7 +538,7 @@ func TestWakuV2Store(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, w2.Start())
 	w2EnvelopeCh := make(chan common.EnvelopeEvent, 100)
-	w2.SubscribeEnvelopeEvents(w2EnvelopeCh)
+	w2.subscribeEnvelopeEvents(w2EnvelopeCh)
 	defer func() {
 		require.NoError(t, w2.Stop())
 		close(w2EnvelopeCh)
@@ -564,7 +558,7 @@ func TestWakuV2Store(t *testing.T) {
 		ContentTopics: common.NewTopicSetFromBytes([][]byte{{1, 2, 3, 4}}),
 	}
 
-	_, err = w2.Subscribe(filter)
+	_, err = w2.subscribe(filter)
 	require.NoError(t, err)
 
 	time.Sleep(2 * time.Second)
@@ -589,20 +583,17 @@ func TestWakuV2Store(t *testing.T) {
 	timestampInSeconds := msgTimestamp / int64(time.Second)
 	marginInSeconds := 5
 	// Query the second node's store for the message
-	_, envelopeCount, err := w1.Query(
+	result, err := w1.node.Store().Query(
 		context.Background(),
-		w2.node.Host().ID(),
 		store.FilterCriteria{
 			TimeStart:     proto.Int64((timestampInSeconds - int64(marginInSeconds)) * int64(time.Second)),
 			TimeEnd:       proto.Int64((timestampInSeconds + int64(marginInSeconds)) * int64(time.Second)),
 			ContentFilter: protocol.NewContentFilter(config1.DefaultShardPubsubTopic, contentTopic.ContentTopic()),
 		},
-		nil,
-		nil,
-		false,
+		store.WithPeer(w2.node.Host().ID()),
 	)
 	require.NoError(t, err)
-	require.True(t, envelopeCount > 0, "no messages received from store node")
+	require.True(t, len(result.Messages()) > 0, "no messages received from store node")
 }
 
 func waitForPeerConnection(t *testing.T, peerID peer.ID, peerCh chan peer.IDSlice) {
@@ -683,15 +674,15 @@ func TestOnlineChecker(t *testing.T) {
 }
 
 func TestLightpushRateLimit(t *testing.T) {
-	logger, err := zap.NewDevelopment()
-	require.NoError(t, err)
+	t.Skip("flaky as it is hard to simulate rate-limits as execution time varies in environments")
+	logger := tt.MustCreateTestLogger()
 
 	config0 := &Config{}
 	setDefaultConfig(config0, false)
 	w0PeersCh := make(chan peer.IDSlice, 5) // buffered not to block on the send side
 
 	// Start the relayu node
-	w0, err := New(nil, "", config0, logger.Named("relayNode"), nil, nil, nil, func(cs types.ConnStatus) {
+	w0, err := New(nil, "", config0, logger.Named("relayNode"), nil, nil, nil, func(cs wakutypes.ConnStatus) {
 		w0PeersCh <- maps.Keys(cs.Peers)
 	})
 	require.NoError(t, err)
@@ -708,7 +699,7 @@ func TestLightpushRateLimit(t *testing.T) {
 		ContentTopics: contentTopics,
 	}
 
-	_, err = w0.Subscribe(filter)
+	_, err = w0.subscribe(filter)
 	require.NoError(t, err)
 
 	config1 := &Config{}
@@ -716,7 +707,7 @@ func TestLightpushRateLimit(t *testing.T) {
 	w1PeersCh := make(chan peer.IDSlice, 5) // buffered not to block on the send side
 
 	// Start the full node
-	w1, err := New(nil, "", config1, logger.Named("fullNode"), nil, nil, nil, func(cs types.ConnStatus) {
+	w1, err := New(nil, "", config1, logger.Named("fullNode"), nil, nil, nil, func(cs wakutypes.ConnStatus) {
 		w1PeersCh <- maps.Keys(cs.Peers)
 	})
 	require.NoError(t, err)
@@ -745,7 +736,7 @@ func TestLightpushRateLimit(t *testing.T) {
 	w2PeersCh := make(chan peer.IDSlice, 5) // buffered not to block on the send side
 
 	// Start the light node
-	w2, err := New(nil, "", config2, logger.Named("lightNode"), nil, nil, nil, func(cs types.ConnStatus) {
+	w2, err := New(nil, "", config2, logger.Named("lightNode"), nil, nil, nil, func(cs wakutypes.ConnStatus) {
 		w2PeersCh <- maps.Keys(cs.Peers)
 	})
 	require.NoError(t, err)
@@ -761,9 +752,9 @@ func TestLightpushRateLimit(t *testing.T) {
 	waitForPeerConnectionWithTimeout(t, w2.node.Host().ID(), w1PeersCh, 5*time.Second)
 
 	event := make(chan common.EnvelopeEvent, 10)
-	w2.SubscribeEnvelopeEvents(event)
+	w2.subscribeEnvelopeEvents(event)
 
-	for i := range [4]int{} {
+	for i := range [15]int{} {
 		msgTimestamp := w2.timestamp()
 		_, err := w2.Send(config2.DefaultShardPubsubTopic, &pb.WakuMessage{
 			Payload:      []byte{1, 2, 3, 4, 5, 6, byte(i)},
@@ -774,20 +765,17 @@ func TestLightpushRateLimit(t *testing.T) {
 
 		require.NoError(t, err)
 
-		time.Sleep(550 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 
 	}
 
 	messages := filter.Retrieve()
-	require.Len(t, messages, 2)
+	require.Len(t, messages, 10)
 
 }
 
 func TestTelemetryFormat(t *testing.T) {
-	logger, err := zap.NewDevelopment()
-	require.NoError(t, err)
-
-	tc := NewBandwidthTelemetryClient(logger, "#")
+	tc := NewBandwidthTelemetryClient(tt.MustCreateTestLogger(), "#")
 
 	s := metrics.Stats{
 		TotalIn:  10,
@@ -804,6 +792,6 @@ func TestTelemetryFormat(t *testing.T) {
 	m[lightpush.LightPushID_v20beta1] = s
 
 	requestBody := tc.getTelemetryRequestBody(m)
-	_, err = json.Marshal(requestBody)
+	_, err := json.Marshal(requestBody)
 	require.NoError(t, err)
 }

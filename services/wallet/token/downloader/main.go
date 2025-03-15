@@ -4,29 +4,31 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"io/ioutil"
 	"net/http"
 	"os"
+	"text/template"
 	"time"
 
 	"github.com/status-im/status-go/services/wallet/token"
+	tokenTypes "github.com/status-im/status-go/services/wallet/token/types"
 
 	"github.com/xeipuuv/gojsonschema"
 )
 
-const uniswapTokensURL = "https://gateway.ipfs.io/ipns/tokens.uniswap.org" // nolint:gosec
-const tokenListSchemaURL = "https://uniswap.org/tokenlist.schema.json"     // nolint:gosec
-
-const templateText = `
-package token
+const templateText = `package token
 
 import (
 	"github.com/ethereum/go-ethereum/common"
+	tokenTypes "github.com/status-im/status-go/services/wallet/token/types"
 )
 
-var uniswapTokens = []*Token{
-	{{ range $token := .Tokens }}
+var {{ .VersionName }} = "{{ .Version }}"
+
+var {{ .TimestampName }} = int64({{ .Timestamp }})
+
+var {{ .AllTokensName }} = []*tokenTypes.Token{
+{{ range $token := .Tokens }}
 	{
 		Address:   common.HexToAddress("{{ $token.Address }}"),
 		Name:      "{{ $token.Name }}",
@@ -34,10 +36,28 @@ var uniswapTokens = []*Token{
 		Decimals:  {{ $token.Decimals }},
 		ChainID:   {{ $token.ChainID }},
 		PegSymbol: "{{ $token.PegSymbol }}",
-	},
-	{{ end }}
+	},{{ end }}
 }
 `
+
+type templateData struct {
+	AllTokensName string
+	VersionName   string
+	TimestampName string
+	Version       string
+	Timestamp     uint64
+	Tokens        []*tokenTypes.Token
+}
+
+type version struct {
+	Major int `json:"major"`
+	Minor int `json:"minor"`
+	Patch int `json:"patch"`
+}
+type details struct {
+	Version   version `json:"version"`
+	Timestamp string  `json:"timestamp"`
+}
 
 func validateDocument(doc string, schemaURL string) (bool, error) {
 	schemaLoader := gojsonschema.NewReferenceLoader(schemaURL)
@@ -55,13 +75,13 @@ func validateDocument(doc string, schemaURL string) (bool, error) {
 	return true, nil
 }
 
-func bytesToTokens(tokenListData []byte) ([]*token.Token, error) {
+func bytesToTokens(tokenListData []byte) ([]*tokenTypes.Token, error) {
 	var objmap map[string]json.RawMessage
 	err := json.Unmarshal(tokenListData, &objmap)
 	if err != nil {
 		return nil, err
 	}
-	var tokens []*token.Token
+	var tokens []*tokenTypes.Token
 	err = json.Unmarshal(objmap["tokens"], &tokens)
 	if err != nil {
 		return nil, err
@@ -70,9 +90,35 @@ func bytesToTokens(tokenListData []byte) ([]*token.Token, error) {
 	return tokens, nil
 }
 
+func getVersionAndTimestamp(data []byte) (version string, timestamp uint64, err error) {
+	var details details
+	err = json.Unmarshal(data, &details)
+	if err != nil {
+		fmt.Printf("Failed to unmarshal version and timestamp: %v\n", err)
+		return
+	}
+
+	time, err := time.Parse(time.RFC3339, details.Timestamp)
+	if err != nil {
+		fmt.Printf("Failed to parse timestamp: %v\n", err)
+		return
+	}
+
+	version = fmt.Sprintf("%d.%d.%d", details.Version.Major, details.Version.Minor, details.Version.Patch)
+	timestamp = uint64(time.Unix())
+	return
+}
+
 func main() {
 	client := &http.Client{Timeout: time.Minute}
-	response, err := client.Get(uniswapTokensURL)
+
+	for key, source := range token.TokensSources {
+		downloadTokens(client, key, source)
+	}
+}
+
+func downloadTokens(client *http.Client, key string, source token.TokensSource) {
+	response, err := client.Get(source.SourceURL)
 	if err != nil {
 		fmt.Printf("Failed to fetch tokens: %v\n", err)
 		return
@@ -85,10 +131,12 @@ func main() {
 		return
 	}
 
-	_, err = validateDocument(string(body), tokenListSchemaURL)
-	if err != nil {
-		fmt.Printf("Failed to validate token list against schema: %v\n", err)
-		return
+	if source.Schema != "" {
+		_, err = validateDocument(string(body), source.Schema)
+		if err != nil {
+			fmt.Printf("Failed to validate token list against schema: %v\n", err)
+			return
+		}
 	}
 
 	tokens, err := bytesToTokens(body)
@@ -97,10 +145,24 @@ func main() {
 		return
 	}
 
+	version, timestamp, err := getVersionAndTimestamp(body)
+	if err != nil {
+		fmt.Printf("Failed to parse version and time: %v\n", err)
+	}
+
+	data := templateData{
+		AllTokensName: fmt.Sprintf("%sTokens", key),
+		VersionName:   fmt.Sprintf("%sVersion", key),
+		TimestampName: fmt.Sprintf("%sTimestamp", key),
+		Version:       version,
+		Timestamp:     timestamp,
+		Tokens:        tokens,
+	}
+
 	tmpl := template.Must(template.New("tokens").Parse(templateText))
 
 	// Create the output Go file
-	file, err := os.Create("uniswap.go")
+	file, err := os.Create(source.OutputFile)
 	if err != nil {
 		fmt.Printf("Failed to create go file: %v\n", err)
 		return
@@ -108,7 +170,7 @@ func main() {
 	defer file.Close()
 
 	// Execute the template with the tokens data and write the result to the file
-	err = tmpl.Execute(file, struct{ Tokens []*token.Token }{Tokens: tokens})
+	err = tmpl.Execute(file, data)
 	if err != nil {
 		fmt.Printf("Failed to write file: %v\n", err)
 		return

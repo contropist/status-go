@@ -43,7 +43,7 @@ func (s *MessengerInstallationSuite) TestReceiveInstallation() {
 		DeviceType: "their-device-type",
 	})
 	s.Require().NoError(err)
-	response, err := theirMessenger.SendPairInstallation(context.Background(), nil)
+	response, err := theirMessenger.SendPairInstallation(context.Background(), "", nil)
 	s.Require().NoError(err)
 	s.Require().NotNil(response)
 	s.Require().Len(response.Chats(), 1)
@@ -63,7 +63,7 @@ func (s *MessengerInstallationSuite) TestReceiveInstallation() {
 	s.Require().Equal("their-name", actualInstallation.InstallationMetadata.Name)
 	s.Require().Equal("their-device-type", actualInstallation.InstallationMetadata.DeviceType)
 
-	err = s.m.EnableInstallation(theirMessenger.installationID)
+	_, err = s.m.EnableInstallation(theirMessenger.installationID)
 	s.Require().NoError(err)
 
 	contactKey, err := crypto.GenerateKey()
@@ -242,7 +242,7 @@ func (s *MessengerInstallationSuite) TestSyncInstallation() {
 		DeviceType: "their-device-type",
 	})
 	s.Require().NoError(err)
-	response, err = theirMessenger.SendPairInstallation(context.Background(), nil)
+	response, err = theirMessenger.SendPairInstallation(context.Background(), "", nil)
 	s.Require().NoError(err)
 	s.Require().NotNil(response)
 	s.Require().Len(response.Chats(), 1)
@@ -262,7 +262,7 @@ func (s *MessengerInstallationSuite) TestSyncInstallation() {
 	s.Require().Equal("their-name", actualInstallation.InstallationMetadata.Name)
 	s.Require().Equal("their-device-type", actualInstallation.InstallationMetadata.DeviceType)
 
-	err = s.m.EnableInstallation(theirMessenger.installationID)
+	_, err = s.m.EnableInstallation(theirMessenger.installationID)
 	s.Require().NoError(err)
 
 	// sync
@@ -366,7 +366,7 @@ func (s *MessengerInstallationSuite) TestSyncInstallationNewMessages() {
 		DeviceType: "their-device-type",
 	})
 	s.Require().NoError(err)
-	response, err := bob2.SendPairInstallation(context.Background(), nil)
+	response, err := bob2.SendPairInstallation(context.Background(), "", nil)
 	s.Require().NoError(err)
 	s.Require().NotNil(response)
 	s.Require().Len(response.Chats(), 1)
@@ -382,7 +382,7 @@ func (s *MessengerInstallationSuite) TestSyncInstallationNewMessages() {
 	s.Require().NoError(err)
 	actualInstallation := response.Installations()[0]
 	s.Require().Equal(bob2.installationID, actualInstallation.ID)
-	err = bob1.EnableInstallation(bob2.installationID)
+	_, err = bob1.EnableInstallation(bob2.installationID)
 	s.Require().NoError(err)
 
 	// send a message from bob1 to alice, it should be received on both bob1 and bob2
@@ -409,6 +409,7 @@ func (s *MessengerInstallationSuite) TestSyncInstallationNewMessages() {
 func (s *MessengerInstallationSuite) TestInitInstallations() {
 	m, err := newMessengerWithKey(s.shh, s.privateKey, s.logger, nil)
 	s.Require().NoError(err)
+	defer TearDownMessenger(&s.Suite, m)
 
 	// m.InitInstallations is already called when we set-up the messenger for
 	// testing, thus this test has no act phase.

@@ -1,32 +1,31 @@
 package token
 
+import tokenTypes "github.com/status-im/status-go/services/wallet/token/types"
+
 type uniswapStore struct {
 }
 
-func newUniswapStore() *uniswapStore {
+func NewUniswapStore() *uniswapStore {
 	return &uniswapStore{}
 }
 
-func (s *uniswapStore) GetTokens() []*Token {
-	for _, token := range uniswapTokens {
-		token.TokenListID = "uniswap"
-	}
-
+func (s *uniswapStore) GetTokens() []*tokenTypes.Token {
 	return uniswapTokens
 }
 
 func (s *uniswapStore) GetName() string {
-	return "Uniswap Labs Default Token List"
+	return TokensSources[UniswapTokenListID].Name
+
 }
 
 func (s *uniswapStore) GetVersion() string {
-	return "11.8.0"
+	return uniswapVersion
 }
 
 func (s *uniswapStore) GetUpdatedAt() int64 {
-	return 1697613003
+	return uniswapTimestamp
 }
 
 func (s *uniswapStore) GetSource() string {
-	return "https://gateway.ipfs.io/ipns/tokens.uniswap.org"
+	return TokensSources[UniswapTokenListID].SourceURL
 }

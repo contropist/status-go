@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/status-im/status-go/account/generator"
+	"github.com/status-im/status-go/api/common"
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/multiaccounts/settings"
 	"github.com/status-im/status-go/params"
@@ -27,11 +28,13 @@ const (
 	shardsTestClusterID      = 16
 	walletAccountDefaultName = "Account 1"
 
-	DefaultKeystoreRelativePath       = "keystore"
-	DefaultKeycardPairingDataFile     = "/ethereum/mainnet_rpc/keycard/pairings.json"
-	DefaultDataDir                    = "/ethereum/mainnet_rpc"
-	DefaultNodeName                   = "StatusIM"
-	DefaultLogFile                    = "geth.log"
+	DefaultKeystoreRelativePath   = "keystore"
+	DefaultKeycardPairingDataFile = "/ethereum/mainnet_rpc/keycard/pairings.json"
+	DefaultDataDir                = "/ethereum/mainnet_rpc"
+	DefaultNodeName               = "StatusIM"
+	DefaultLogFile                = "geth.log"
+	DefaultAPILogFile             = "api.log"
+
 	DefaultLogLevel                   = "ERROR"
 	DefaultMaxPeers                   = 20
 	DefaultMaxPendingPeers            = 20
@@ -167,8 +170,9 @@ func SetFleet(fleet string, nodeConfig *params.NodeConfig) error {
 
 func buildWalletConfig(request *requests.WalletSecretsConfig, statusProxyEnabled bool) params.WalletConfig {
 	walletConfig := params.WalletConfig{
-		Enabled:        true,
-		AlchemyAPIKeys: make(map[uint64]string),
+		Enabled:                true,
+		EnableMercuryoProvider: true,
+		AlchemyAPIKeys:         make(map[uint64]string),
 	}
 
 	if request.StatusProxyStageName != "" {
@@ -196,31 +200,28 @@ func buildWalletConfig(request *requests.WalletSecretsConfig, statusProxyEnabled
 	}
 
 	if request.AlchemyEthereumMainnetToken != "" {
-		walletConfig.AlchemyAPIKeys[mainnetChainID] = request.AlchemyEthereumMainnetToken
-	}
-	if request.AlchemyEthereumGoerliToken != "" {
-		walletConfig.AlchemyAPIKeys[goerliChainID] = request.AlchemyEthereumGoerliToken
+		walletConfig.AlchemyAPIKeys[common.MainnetChainID] = request.AlchemyEthereumMainnetToken
 	}
 	if request.AlchemyEthereumSepoliaToken != "" {
-		walletConfig.AlchemyAPIKeys[sepoliaChainID] = request.AlchemyEthereumSepoliaToken
+		walletConfig.AlchemyAPIKeys[common.SepoliaChainID] = request.AlchemyEthereumSepoliaToken
 	}
 	if request.AlchemyArbitrumMainnetToken != "" {
-		walletConfig.AlchemyAPIKeys[arbitrumChainID] = request.AlchemyArbitrumMainnetToken
-	}
-	if request.AlchemyArbitrumGoerliToken != "" {
-		walletConfig.AlchemyAPIKeys[arbitrumGoerliChainID] = request.AlchemyArbitrumGoerliToken
+		walletConfig.AlchemyAPIKeys[common.ArbitrumChainID] = request.AlchemyArbitrumMainnetToken
 	}
 	if request.AlchemyArbitrumSepoliaToken != "" {
-		walletConfig.AlchemyAPIKeys[arbitrumSepoliaChainID] = request.AlchemyArbitrumSepoliaToken
+		walletConfig.AlchemyAPIKeys[common.ArbitrumSepoliaChainID] = request.AlchemyArbitrumSepoliaToken
 	}
 	if request.AlchemyOptimismMainnetToken != "" {
-		walletConfig.AlchemyAPIKeys[optimismChainID] = request.AlchemyOptimismMainnetToken
-	}
-	if request.AlchemyOptimismGoerliToken != "" {
-		walletConfig.AlchemyAPIKeys[optimismGoerliChainID] = request.AlchemyOptimismGoerliToken
+		walletConfig.AlchemyAPIKeys[common.OptimismChainID] = request.AlchemyOptimismMainnetToken
 	}
 	if request.AlchemyOptimismSepoliaToken != "" {
-		walletConfig.AlchemyAPIKeys[optimismSepoliaChainID] = request.AlchemyOptimismSepoliaToken
+		walletConfig.AlchemyAPIKeys[common.OptimismSepoliaChainID] = request.AlchemyOptimismSepoliaToken
+	}
+	if request.AlchemyBaseMainnetToken != "" {
+		walletConfig.AlchemyAPIKeys[common.BaseChainID] = request.AlchemyBaseMainnetToken
+	}
+	if request.AlchemyBaseSepoliaToken != "" {
+		walletConfig.AlchemyAPIKeys[common.BaseSepoliaChainID] = request.AlchemyBaseSepoliaToken
 	}
 	if request.StatusProxyMarketUser != "" {
 		walletConfig.StatusProxyMarketUser = request.StatusProxyMarketUser
@@ -228,11 +229,23 @@ func buildWalletConfig(request *requests.WalletSecretsConfig, statusProxyEnabled
 	if request.StatusProxyMarketPassword != "" {
 		walletConfig.StatusProxyMarketPassword = request.StatusProxyMarketPassword
 	}
+
+	// FIXME: remove when EthRpcProxy* is integrated
 	if request.StatusProxyBlockchainUser != "" {
 		walletConfig.StatusProxyBlockchainUser = request.StatusProxyBlockchainUser
 	}
 	if request.StatusProxyBlockchainPassword != "" {
 		walletConfig.StatusProxyBlockchainPassword = request.StatusProxyBlockchainPassword
+	}
+
+	if request.EthRpcProxyUrl != "" {
+		walletConfig.EthRpcProxyUrl = request.EthRpcProxyUrl
+	}
+	if request.EthRpcProxyUser != "" {
+		walletConfig.EthRpcProxyUser = request.EthRpcProxyUser
+	}
+	if request.EthRpcProxyPassword != "" {
+		walletConfig.EthRpcProxyPassword = request.EthRpcProxyPassword
 	}
 
 	walletConfig.StatusProxyEnabled = statusProxyEnabled
@@ -252,6 +265,22 @@ func overrideApiConfigProd(nodeConfig *params.NodeConfig, config *requests.APICo
 	nodeConfig.WSEnabled = config.WSEnabled
 	nodeConfig.WSHost = config.WSHost
 	nodeConfig.WSPort = config.WSPort
+}
+
+// getMainnetRPCURL retuevrns URL of the first provider with TokenAuth from mainnet network
+func getMainnetRPCURL(networks []params.Network) string {
+	for _, network := range networks {
+		if network.ChainID != common.MainnetChainID {
+			continue
+		}
+		for _, provider := range network.RpcProviders {
+			if provider.AuthType == params.TokenAuth && provider.Enabled {
+				return provider.GetFullURL()
+			}
+		}
+		break
+	}
+	return ""
 }
 
 func DefaultNodeConfig(installationID string, request *requests.CreateAccount, opts ...params.Option) (*params.NodeConfig, error) {
@@ -286,16 +315,6 @@ func DefaultNodeConfig(installationID string, request *requests.CreateAccount, o
 		nodeConfig.NetworkID = *request.NetworkID
 	} else {
 		nodeConfig.NetworkID = nodeConfig.Networks[0].ChainID
-	}
-
-	if request.UpstreamConfig != "" {
-		nodeConfig.UpstreamConfig = params.UpstreamRPCConfig{
-			Enabled: true,
-			URL:     request.UpstreamConfig,
-		}
-	} else {
-		nodeConfig.UpstreamConfig.URL = mainnet(request.WalletSecretsConfig.StatusProxyStageName).RPCURL
-		nodeConfig.UpstreamConfig.Enabled = true
 	}
 
 	nodeConfig.Name = DefaultNodeName
@@ -354,13 +373,13 @@ func DefaultNodeConfig(installationID string, request *requests.CreateAccount, o
 	if request.VerifyTransactionURL != nil {
 		nodeConfig.ShhextConfig.VerifyTransactionURL = *request.VerifyTransactionURL
 	} else {
-		nodeConfig.ShhextConfig.VerifyTransactionURL = mainnet(request.WalletSecretsConfig.StatusProxyStageName).FallbackURL
+		nodeConfig.ShhextConfig.VerifyTransactionURL = getMainnetRPCURL(nodeConfig.Networks)
 	}
 
 	if request.VerifyENSURL != nil {
 		nodeConfig.ShhextConfig.VerifyENSURL = *request.VerifyENSURL
 	} else {
-		nodeConfig.ShhextConfig.VerifyENSURL = mainnet(request.WalletSecretsConfig.StatusProxyStageName).FallbackURL
+		nodeConfig.ShhextConfig.VerifyENSURL = getMainnetRPCURL(nodeConfig.Networks)
 	}
 
 	if request.VerifyTransactionChainID != nil {
@@ -369,10 +388,6 @@ func DefaultNodeConfig(installationID string, request *requests.CreateAccount, o
 
 	if request.VerifyENSContractAddress != nil {
 		nodeConfig.ShhextConfig.VerifyENSContractAddress = *request.VerifyENSContractAddress
-	}
-
-	if request.NetworkID != nil {
-		nodeConfig.NetworkID = *request.NetworkID
 	}
 
 	nodeConfig.TorrentConfig = params.TorrentConfig{

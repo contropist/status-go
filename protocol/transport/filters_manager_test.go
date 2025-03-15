@@ -8,15 +8,16 @@ import (
 	"os"
 	"testing"
 
-	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
+	"github.com/libp2p/go-libp2p/core/peer"
+
 	"github.com/status-im/status-go/protocol/tt"
+	"github.com/status-im/status-go/wakuv2"
 
 	_ "github.com/mutecomm/go-sqlcipher/v4"
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/zap"
 
 	"github.com/status-im/status-go/eth-node/crypto"
-	"github.com/status-im/status-go/waku"
 )
 
 type testKeysPersistence struct {
@@ -90,7 +91,17 @@ func (s *FiltersManagerSuite) SetupTest() {
 
 	keysPersistence := newTestKeysPersistence()
 
-	waku := gethbridge.NewGethWakuWrapper(waku.New(&waku.DefaultConfig, nil))
+	waku, err := wakuv2.New(
+		nil,
+		"",
+		&wakuv2.DefaultConfig,
+		s.logger,
+		nil,
+		nil,
+		func([]byte, peer.ID, error) {},
+		nil,
+	)
+	s.Require().NoError(err)
 
 	s.chats, err = NewFiltersManager(keysPersistence, waku, s.manager[0].privateKey, s.logger)
 	s.Require().NoError(err)

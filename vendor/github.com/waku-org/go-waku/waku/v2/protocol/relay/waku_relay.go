@@ -280,10 +280,18 @@ func (w *WakuRelay) Publish(ctx context.Context, message *pb.WakuMessage, opts .
 		if err != nil {
 			return pb.MessageHash{}, err
 		}
+		_, err = w.subscribeToPubsubTopic(params.pubsubTopic)
+		if err != nil {
+			return pb.MessageHash{}, err
+		}
 	}
 
 	if !w.EnoughPeersToPublishToTopic(params.pubsubTopic) {
 		return pb.MessageHash{}, errors.New("not enough peers to publish")
+	}
+
+	if !w.IsSubscribed(params.pubsubTopic) {
+		return pb.MessageHash{}, errors.New("cannot publish to unsubscribed topic")
 	}
 
 	w.topicsMutex.Lock()
@@ -431,6 +439,7 @@ func (w *WakuRelay) subscribe(ctx context.Context, contentFilter waku_proto.Cont
 
 		subscriptions = append(subscriptions, subscription)
 		go func() {
+			defer utils.LogOnPanic()
 			<-ctx.Done()
 			subscription.Unsubscribe()
 		}()
@@ -525,6 +534,7 @@ func (w *WakuRelay) unsubscribeFromPubsubTopic(topicData *pubsubTopicSubscriptio
 }
 
 func (w *WakuRelay) pubsubTopicMsgHandler(sub *pubsub.Subscription) {
+	defer utils.LogOnPanic()
 	defer w.WaitGroup().Done()
 
 	for {

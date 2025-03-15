@@ -7,13 +7,15 @@ import (
 	"go.uber.org/zap"
 
 	gethcommon "github.com/ethereum/go-ethereum/common"
-	"github.com/status-im/status-go/eth-node/types"
+	gocommon "github.com/status-im/status-go/common"
 	enstypes "github.com/status-im/status-go/eth-node/types/ens"
 	"github.com/status-im/status-go/protocol/common"
+
+	gethnode "github.com/status-im/status-go/eth-node/node"
 )
 
 type Verifier struct {
-	node            types.Node
+	node            gethnode.Node
 	online          bool
 	persistence     *Persistence
 	logger          *zap.Logger
@@ -24,7 +26,7 @@ type Verifier struct {
 	quit            chan struct{}
 }
 
-func New(node types.Node, logger *zap.Logger, timesource common.TimeSource, db *sql.DB, rpcEndpoint, contractAddress string) *Verifier {
+func New(node gethnode.Node, logger *zap.Logger, timesource common.TimeSource, db *sql.DB, rpcEndpoint, contractAddress string) *Verifier {
 	persistence := NewPersistence(db)
 	return &Verifier{
 		node:            node,
@@ -90,7 +92,7 @@ func (v *Verifier) SetOnline(online bool) {
 }
 
 func (v *Verifier) verifyLoop() {
-
+	defer gocommon.LogOnPanic()
 	ticker := time.NewTicker(30 * time.Second)
 	for {
 		select {
@@ -137,7 +139,7 @@ func (v *Verifier) ReverseResolve(address gethcommon.Address) (string, error) {
 
 // Verify verifies that a registered ENS name matches the expected public key
 func (v *Verifier) verify(rpcEndpoint, contractAddress string) error {
-	v.logger.Debug("verifying ENS Names", zap.String("endpoint", rpcEndpoint))
+	v.logger.Debug("verifying ENS Names")
 	verifier := v.node.NewENSVerifier(v.logger)
 
 	var ensDetails []enstypes.ENSDetails

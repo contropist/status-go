@@ -1,17 +1,15 @@
 package wakuv2ext
 
 import (
-	"github.com/ethereum/go-ethereum/log"
-	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/services/ext"
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 // PublicAPI extends waku public API.
 type PublicAPI struct {
 	*ext.PublicAPI
 	service   *Service
-	publicAPI types.PublicWakuAPI
-	log       log.Logger
+	publicAPI wakutypes.PublicWakuAPI
 }
 
 // NewPublicAPI returns instance of the public API.
@@ -20,6 +18,5 @@ func NewPublicAPI(s *Service) *PublicAPI {
 		PublicAPI: ext.NewPublicAPI(s.Service, s.w),
 		service:   s,
 		publicAPI: s.w.PublicWakuAPI(),
-		log:       log.New("package", "status-go/services/wakuext.PublicAPI"),
 	}
 }

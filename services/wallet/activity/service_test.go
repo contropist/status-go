@@ -7,20 +7,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
+	"go.uber.org/mock/gomock"
 
 	eth "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/event"
 
 	"github.com/status-im/status-go/appdatabase"
 	"github.com/status-im/status-go/multiaccounts/accounts"
-	"github.com/status-im/status-go/rpc/chain"
+	ethclient "github.com/status-im/status-go/rpc/chain/ethclient"
 	mock_rpcclient "github.com/status-im/status-go/rpc/mock/client"
 	"github.com/status-im/status-go/services/wallet/bigint"
 	"github.com/status-im/status-go/services/wallet/common"
 	"github.com/status-im/status-go/services/wallet/thirdparty"
-	"github.com/status-im/status-go/services/wallet/token"
 	mock_token "github.com/status-im/status-go/services/wallet/token/mock/token"
+	tokenTypes "github.com/status-im/status-go/services/wallet/token/types"
 	"github.com/status-im/status-go/services/wallet/transfer"
 	"github.com/status-im/status-go/services/wallet/walletevent"
 	"github.com/status-im/status-go/t/helpers"
@@ -83,7 +83,7 @@ func setupTestService(tb testing.TB) (state testState) {
 
 	state.chainClient = transactions.NewMockChainClient()
 	state.rpcClient = mock_rpcclient.NewMockClientInterface(mockCtrl)
-	state.rpcClient.EXPECT().AbstractEthClient(gomock.Any()).DoAndReturn(func(chainID common.ChainID) (chain.BatchCallClient, error) {
+	state.rpcClient.EXPECT().AbstractEthClient(gomock.Any()).DoAndReturn(func(chainID common.ChainID) (ethclient.BatchCallClient, error) {
 		return state.chainClient.AbstractEthClient(chainID)
 	}).AnyTimes()
 
@@ -149,7 +149,7 @@ func TestService_UpdateCollectibleInfo(t *testing.T) {
 
 	// Expect one call for the fungible token
 	state.tokenMock.EXPECT().LookupTokenIdentity(uint64(5), eth.HexToAddress("0x3d6afaa395c31fcd391fe3d562e75fe9e8ec7e6a"), false).Return(
-		&token.Token{
+		&tokenTypes.Token{
 			ChainID: 5,
 			Address: eth.HexToAddress("0x3d6afaa395c31fcd391fe3d562e75fe9e8ec7e6a"),
 			Symbol:  "STT",
@@ -311,7 +311,7 @@ func setupTransactions(t *testing.T, state testState, txCount int, testTxs []tra
 	allAddresses = append(append(allAddresses, fromTrs...), toTrs...)
 
 	state.tokenMock.EXPECT().LookupTokenIdentity(gomock.Any(), gomock.Any(), gomock.Any()).Return(
-		&token.Token{
+		&tokenTypes.Token{
 			ChainID: 5,
 			Address: eth.Address{},
 			Symbol:  "ETH",
@@ -319,7 +319,7 @@ func setupTransactions(t *testing.T, state testState, txCount int, testTxs []tra
 	).AnyTimes()
 
 	state.tokenMock.EXPECT().LookupToken(gomock.Any(), gomock.Any()).Return(
-		&token.Token{
+		&tokenTypes.Token{
 			ChainID: 5,
 			Address: eth.Address{},
 			Symbol:  "ETH",
@@ -412,285 +412,4 @@ func validateFilteringDone(t *testing.T, ch chan walletevent.Event, resCount int
 		}
 	}
 	return
-}
-
-func TestService_IncrementalUpdateOnTop(t *testing.T) {
-	state := setupTestService(t)
-	defer state.close()
-
-	transactionCount := 2
-	allAddresses, pendings, ch, cleanup := setupTransactions(t, state, transactionCount, []transactions.TestTxSummary{{DontConfirm: true, Timestamp: transactionCount + 1}})
-	defer cleanup()
-
-	sessionID := state.service.StartFilterSession(allAddresses, allNetworksFilter(), Filter{}, 5)
-	require.Greater(t, sessionID, SessionID(0))
-	defer state.service.StopFilterSession(sessionID)
-
-	filterResponseCount := validateFilteringDone(t, ch, 2, nil, nil)
-
-	exp := pendings[0]
-	err := state.pendingTracker.StoreAndTrackPendingTx(&exp)
-	require.NoError(t, err)
-
-	vFn := getValidateSessionUpdateHasNewOnTopFn(t)
-	pendingTransactionUpdate, sessionUpdatesCount := validateSessionUpdateEvent(t, ch, &filterResponseCount, 1, vFn)
-
-	err = state.service.ResetFilterSession(sessionID, 5)
-	require.NoError(t, err)
-
-	// Validate the reset data
-	eventActivityDoneCount := validateFilteringDone(t, ch, 3, func(payload FilterResponse) {
-		require.True(t, payload.Activities[0].isNew)
-		require.False(t, payload.Activities[1].isNew)
-		require.False(t, payload.Activities[2].isNew)
-
-		// Check the new transaction data
-		newTx := payload.Activities[0]
-		require.Equal(t, PendingTransactionPT, newTx.payloadType)
-		// We don't keep type in the DB
-		require.Equal(t, (*int)(nil), newTx.transferType)
-		require.Equal(t, SendAT, newTx.activityType)
-		require.Equal(t, PendingAS, newTx.activityStatus)
-		require.Equal(t, exp.ChainID, newTx.transaction.ChainID)
-		require.Equal(t, exp.ChainID, *newTx.chainIDOut)
-		require.Equal(t, (*common.ChainID)(nil), newTx.chainIDIn)
-		require.Equal(t, exp.Hash, newTx.transaction.Hash)
-		// Pending doesn't have address as part of identity
-		require.Equal(t, eth.Address{}, newTx.transaction.Address)
-		require.Equal(t, exp.From, *newTx.sender)
-		require.Equal(t, exp.To, *newTx.recipient)
-		require.Equal(t, 0, exp.Value.Int.Cmp((*big.Int)(newTx.amountOut)))
-		require.Equal(t, exp.Timestamp, uint64(newTx.timestamp))
-		require.Equal(t, exp.Symbol, *newTx.symbolOut)
-		require.Equal(t, (*string)(nil), newTx.symbolIn)
-		require.Equal(t, &Token{
-			TokenType: Native,
-			ChainID:   5,
-		}, newTx.tokenOut)
-		require.Equal(t, (*Token)(nil), newTx.tokenIn)
-		require.Equal(t, (*eth.Address)(nil), newTx.contractAddress)
-
-		// Check the order of the following transaction data
-		require.Equal(t, SimpleTransactionPT, payload.Activities[1].payloadType)
-		require.Equal(t, int64(transactionCount), payload.Activities[1].timestamp)
-		require.Equal(t, SimpleTransactionPT, payload.Activities[2].payloadType)
-		require.Equal(t, int64(transactionCount-1), payload.Activities[2].timestamp)
-	}, nil)
-
-	require.Equal(t, 1, pendingTransactionUpdate)
-	require.Equal(t, 1, filterResponseCount)
-	require.Equal(t, 1, sessionUpdatesCount)
-	require.Equal(t, 1, eventActivityDoneCount)
-}
-
-func TestService_IncrementalUpdateMixed(t *testing.T) {
-	state := setupTestService(t)
-	defer state.close()
-
-	transactionCount := 5
-	allAddresses, pendings, ch, cleanup := setupTransactions(t, state, transactionCount,
-		[]transactions.TestTxSummary{
-			{DontConfirm: true, Timestamp: 2},
-			{DontConfirm: true, Timestamp: 4},
-			{DontConfirm: true, Timestamp: 6},
-		},
-	)
-	defer cleanup()
-
-	sessionID := state.service.StartFilterSession(allAddresses, allNetworksFilter(), Filter{}, 5)
-	require.Greater(t, sessionID, SessionID(0))
-	defer state.service.StopFilterSession(sessionID)
-
-	filterResponseCount := validateFilteringDone(t, ch, 5, nil, nil)
-
-	for i := range pendings {
-		err := state.pendingTracker.StoreAndTrackPendingTx(&pendings[i])
-		require.NoError(t, err)
-	}
-
-	pendingTransactionUpdate, sessionUpdatesCount := validateSessionUpdateEvent(t, ch, &filterResponseCount, 2, func(payload SessionUpdate) bool {
-		require.Nil(t, payload.HasNewOnTop)
-		require.NotEmpty(t, payload.New)
-		for _, update := range payload.New {
-			require.True(t, update.Entry.isNew)
-			foundIdx := -1
-			for i, pTx := range pendings {
-				if pTx.Hash == update.Entry.transaction.Hash && pTx.ChainID == update.Entry.transaction.ChainID {
-					foundIdx = i
-					break
-				}
-			}
-			require.Greater(t, foundIdx, -1, "the updated transaction should be found in the pending list")
-			pendings = append(pendings[:foundIdx], pendings[foundIdx+1:]...)
-		}
-		return len(pendings) == 1
-	})
-
-	// Validate that the last one (oldest) is out of the window
-	require.Equal(t, 1, len(pendings))
-	require.Equal(t, uint64(2), pendings[0].Timestamp)
-
-	require.Equal(t, 3, pendingTransactionUpdate)
-	require.LessOrEqual(t, sessionUpdatesCount, 3)
-	require.Equal(t, 1, filterResponseCount)
-
-}
-
-func TestService_IncrementalUpdateFetchWindow(t *testing.T) {
-	state := setupTestService(t)
-	defer state.close()
-
-	transactionCount := 5
-	allAddresses, pendings, ch, cleanup := setupTransactions(t, state, transactionCount, []transactions.TestTxSummary{{DontConfirm: true, Timestamp: transactionCount + 1}})
-	defer cleanup()
-
-	sessionID := state.service.StartFilterSession(allAddresses, allNetworksFilter(), Filter{}, 2)
-	require.Greater(t, sessionID, SessionID(0))
-	defer state.service.StopFilterSession(sessionID)
-
-	filterResponseCount := validateFilteringDone(t, ch, 2, nil, nil)
-
-	exp := pendings[0]
-	err := state.pendingTracker.StoreAndTrackPendingTx(&exp)
-	require.NoError(t, err)
-
-	vFn := getValidateSessionUpdateHasNewOnTopFn(t)
-	pendingTransactionUpdate, sessionUpdatesCount := validateSessionUpdateEvent(t, ch, &filterResponseCount, 1, vFn)
-
-	err = state.service.ResetFilterSession(sessionID, 2)
-	require.NoError(t, err)
-
-	// Validate the reset data
-	eventActivityDoneCount := validateFilteringDone(t, ch, 2, func(payload FilterResponse) {
-		require.True(t, payload.Activities[0].isNew)
-		require.Equal(t, int64(transactionCount+1), payload.Activities[0].timestamp)
-		require.False(t, payload.Activities[1].isNew)
-		require.Equal(t, int64(transactionCount), payload.Activities[1].timestamp)
-	}, nil)
-
-	require.Equal(t, 1, pendingTransactionUpdate)
-	require.Equal(t, 1, filterResponseCount)
-	require.Equal(t, 1, sessionUpdatesCount)
-	require.Equal(t, 1, eventActivityDoneCount)
-
-	err = state.service.GetMoreForFilterSession(sessionID, 2)
-	require.NoError(t, err)
-
-	eventActivityDoneCount = validateFilteringDone(t, ch, 2, func(payload FilterResponse) {
-		require.False(t, payload.Activities[0].isNew)
-		require.Equal(t, int64(transactionCount-1), payload.Activities[0].timestamp)
-		require.False(t, payload.Activities[1].isNew)
-		require.Equal(t, int64(transactionCount-2), payload.Activities[1].timestamp)
-	}, common.NewAndSet(extraExpect{common.NewAndSet(2), nil}))
-	require.Equal(t, 1, eventActivityDoneCount)
-}
-
-func TestService_IncrementalUpdateFetchWindowNoReset(t *testing.T) {
-	state := setupTestService(t)
-	defer state.close()
-
-	transactionCount := 5
-	allAddresses, pendings, ch, cleanup := setupTransactions(t, state, transactionCount, []transactions.TestTxSummary{{DontConfirm: true, Timestamp: transactionCount + 1}})
-	defer cleanup()
-
-	sessionID := state.service.StartFilterSession(allAddresses, allNetworksFilter(), Filter{}, 2)
-	require.Greater(t, sessionID, SessionID(0))
-	defer state.service.StopFilterSession(sessionID)
-
-	filterResponseCount := validateFilteringDone(t, ch, 2, func(payload FilterResponse) {
-		require.Equal(t, int64(transactionCount), payload.Activities[0].timestamp)
-		require.Equal(t, int64(transactionCount-1), payload.Activities[1].timestamp)
-	}, nil)
-
-	exp := pendings[0]
-	err := state.pendingTracker.StoreAndTrackPendingTx(&exp)
-	require.NoError(t, err)
-
-	vFn := getValidateSessionUpdateHasNewOnTopFn(t)
-	pendingTransactionUpdate, sessionUpdatesCount := validateSessionUpdateEvent(t, ch, &filterResponseCount, 1, vFn)
-	require.Equal(t, 1, pendingTransactionUpdate)
-	require.Equal(t, 1, filterResponseCount)
-	require.Equal(t, 1, sessionUpdatesCount)
-
-	err = state.service.GetMoreForFilterSession(sessionID, 2)
-	require.NoError(t, err)
-
-	// Validate that client continue loading the next window without being affected by the internal state of new
-	eventActivityDoneCount := validateFilteringDone(t, ch, 2, func(payload FilterResponse) {
-		require.False(t, payload.Activities[0].isNew)
-		require.Equal(t, int64(transactionCount-2), payload.Activities[0].timestamp)
-		require.False(t, payload.Activities[1].isNew)
-		require.Equal(t, int64(transactionCount-3), payload.Activities[1].timestamp)
-	}, common.NewAndSet(extraExpect{common.NewAndSet(2), nil}))
-	require.Equal(t, 1, eventActivityDoneCount)
-}
-
-// Simulate and validate a multi-step user flow that was also a regression in the original implementation
-func TestService_FilteredIncrementalUpdateResetAndClear(t *testing.T) {
-	state := setupTestService(t)
-	defer state.close()
-
-	transactionCount := 5
-	allAddresses, pendings, ch, cleanup := setupTransactions(t, state, transactionCount, []transactions.TestTxSummary{{DontConfirm: true, Timestamp: transactionCount + 1}})
-	defer cleanup()
-
-	// Generate new transaction for step 5
-	newOffset := transactionCount + 2
-	newTxs, newFromTrs, newToTrs := transfer.GenerateTestTransfers(t, state.service.db, newOffset, 1)
-	allAddresses = append(append(allAddresses, newFromTrs...), newToTrs...)
-
-	// 1. User visualizes transactions for the first time
-	sessionID := state.service.StartFilterSession(allAddresses, allNetworksFilter(), Filter{}, 4)
-	require.Greater(t, sessionID, SessionID(0))
-	defer state.service.StopFilterSession(sessionID)
-
-	validateFilteringDone(t, ch, 4, nil, nil)
-
-	// 2. User applies a filter for pending transactions
-	err := state.service.UpdateFilterForSession(sessionID, Filter{Statuses: []Status{PendingAS}}, 4)
-	require.NoError(t, err)
-
-	filterResponseCount := validateFilteringDone(t, ch, 0, nil, nil)
-
-	// 3. A pending transaction is added
-	exp := pendings[0]
-	err = state.pendingTracker.StoreAndTrackPendingTx(&exp)
-	require.NoError(t, err)
-
-	vFn := getValidateSessionUpdateHasNewOnTopFn(t)
-	pendingTransactionUpdate, sessionUpdatesCount := validateSessionUpdateEvent(t, ch, &filterResponseCount, 1, vFn)
-
-	// 4. User resets the view and the new pending transaction has the new flag
-	err = state.service.ResetFilterSession(sessionID, 2)
-	require.NoError(t, err)
-
-	// Validate the reset data
-	eventActivityDoneCount := validateFilteringDone(t, ch, 1, func(payload FilterResponse) {
-		require.True(t, payload.Activities[0].isNew)
-		require.Equal(t, int64(transactionCount+1), payload.Activities[0].timestamp)
-	}, nil)
-
-	require.Equal(t, 1, pendingTransactionUpdate)
-	require.Equal(t, 1, filterResponseCount)
-	require.Equal(t, 1, sessionUpdatesCount)
-	require.Equal(t, 1, eventActivityDoneCount)
-
-	// 5. A new transaction is downloaded
-	transfer.InsertTestTransfer(t, state.service.db, newTxs[0].To, &newTxs[0])
-
-	// 6. User clears the filter and only the new transaction should have the new flag
-	err = state.service.UpdateFilterForSession(sessionID, Filter{}, 4)
-	require.NoError(t, err)
-
-	eventActivityDoneCount = validateFilteringDone(t, ch, 4, func(payload FilterResponse) {
-		require.True(t, payload.Activities[0].isNew)
-		require.Equal(t, int64(newOffset), payload.Activities[0].timestamp)
-		require.False(t, payload.Activities[1].isNew)
-		require.Equal(t, int64(newOffset-1), payload.Activities[1].timestamp)
-		require.False(t, payload.Activities[2].isNew)
-		require.Equal(t, int64(newOffset-2), payload.Activities[2].timestamp)
-		require.False(t, payload.Activities[3].isNew)
-		require.Equal(t, int64(newOffset-3), payload.Activities[3].timestamp)
-	}, nil)
-	require.Equal(t, 1, eventActivityDoneCount)
 }

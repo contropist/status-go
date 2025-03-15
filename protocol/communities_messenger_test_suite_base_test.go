@@ -10,14 +10,14 @@ import (
 	gethcommon "github.com/ethereum/go-ethereum/common"
 	hexutil "github.com/ethereum/go-ethereum/common/hexutil"
 
-	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
 	"github.com/status-im/status-go/eth-node/crypto"
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/protocol/communities"
 	"github.com/status-im/status-go/protocol/protobuf"
 	"github.com/status-im/status-go/protocol/requests"
 	"github.com/status-im/status-go/protocol/tt"
-	"github.com/status-im/status-go/waku"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 // TODO: in future adapt this struct to use waku v2 and switch all tests to waku v2
@@ -25,7 +25,7 @@ type CommunitiesMessengerTestSuiteBase struct {
 	suite.Suite
 	// If one wants to send messages between different instances of Messenger,
 	// a single Waku service should be shared.
-	shh                     types.Waku
+	shh                     wakutypes.Waku
 	logger                  *zap.Logger
 	mockedBalances          communities.BalancesByChain
 	mockedCollectibles      communities.CollectiblesByChain
@@ -47,11 +47,10 @@ func (s *CommunitiesMessengerTestSuiteBase) SetupTest() {
 
 	s.mockedBalances = make(communities.BalancesByChain)
 
-	config := waku.DefaultConfig
-	config.MinimumAcceptedPoW = 0
-	shh := waku.New(&config, s.logger)
-	s.shh = gethbridge.NewGethWakuWrapper(shh)
+	shh, err := newTestWakuNode(s.logger)
+	s.Require().NoError(err)
 	s.Require().NoError(shh.Start())
+	s.shh = shh
 }
 
 func (s *CommunitiesMessengerTestSuiteBase) TearDownTest() {

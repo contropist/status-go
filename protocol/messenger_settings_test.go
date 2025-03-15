@@ -4,14 +4,11 @@ import (
 	"context"
 	"testing"
 
-	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
-
 	"github.com/status-im/status-go/eth-node/crypto"
 	"github.com/status-im/status-go/multiaccounts/common"
 	"github.com/status-im/status-go/protocol/encryption/multidevice"
 	"github.com/status-im/status-go/protocol/requests"
 	"github.com/status-im/status-go/protocol/tt"
-	"github.com/status-im/status-go/waku"
 
 	"github.com/stretchr/testify/suite"
 )
@@ -28,11 +25,10 @@ type MessengerSettingsSuite struct {
 func (s *MessengerSettingsSuite) SetupTest() {
 	s.logger = tt.MustCreateTestLogger()
 
-	config := waku.DefaultConfig
-	config.MinimumAcceptedPoW = 0
-	shh := waku.New(&config, s.logger)
-	s.shh = gethbridge.NewGethWakuWrapper(shh)
+	shh, err := newTestWakuNode(s.logger)
+	s.Require().NoError(err)
 	s.Require().NoError(shh.Start())
+	s.shh = shh
 
 	pk, err := crypto.GenerateKey()
 	s.Require().NoError(err)

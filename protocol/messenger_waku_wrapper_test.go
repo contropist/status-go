@@ -5,55 +5,52 @@ import (
 
 	"go.uber.org/zap"
 
-	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
-	"github.com/status-im/status-go/eth-node/types"
-	"github.com/status-im/status-go/waku"
+	wakutypes "github.com/status-im/status-go/waku/types"
+	"github.com/status-im/status-go/wakuv2"
 )
 
 type testWakuWrapper struct {
-	*gethbridge.GethWakuWrapper
+	wakutypes.Waku
 
-	publicWakuAPIWrapper *testPublicWakuAPIWrapper
+	api *testPublicWakuAPI
 }
 
-func newTestWaku(w *waku.Waku) types.Waku {
-	wrapper := gethbridge.NewGethWakuWrapper(w)
+func newTestWaku(w *wakuv2.Waku) wakutypes.Waku {
 	return &testWakuWrapper{
-		GethWakuWrapper:      wrapper.(*gethbridge.GethWakuWrapper),
-		publicWakuAPIWrapper: newTestPublicWakuAPI(waku.NewPublicWakuAPI(w)).(*testPublicWakuAPIWrapper),
+		Waku: w,
+		api:  newTestPublicWakuAPI(wakuv2.NewPublicWakuAPI(w)),
 	}
 }
 
-func (tw *testWakuWrapper) PublicWakuAPI() types.PublicWakuAPI {
-	return tw.publicWakuAPIWrapper
+func (tw *testWakuWrapper) PublicWakuAPI() wakutypes.PublicWakuAPI {
+	return tw.api
 }
 
 func (tw *testWakuWrapper) SubscribePostEvents() chan *PostMessageSubscription {
 	subscription := make(chan *PostMessageSubscription, 100)
-	tw.publicWakuAPIWrapper.postSubscriptions = append(tw.publicWakuAPIWrapper.postSubscriptions, subscription)
+	tw.api.postSubscriptions = append(tw.api.postSubscriptions, subscription)
 	return subscription
 }
 
 type PostMessageSubscription struct {
 	id  []byte
-	msg *types.NewMessage
+	msg *wakutypes.NewMessage
 }
 
-type testPublicWakuAPIWrapper struct {
-	*gethbridge.GethPublicWakuAPIWrapper
+type testPublicWakuAPI struct {
+	*wakuv2.PublicWakuAPI
 
 	postSubscriptions []chan *PostMessageSubscription
 }
 
-func newTestPublicWakuAPI(api *waku.PublicWakuAPI) types.PublicWakuAPI {
-	wrapper := gethbridge.NewGethPublicWakuAPIWrapper(api)
-	return &testPublicWakuAPIWrapper{
-		GethPublicWakuAPIWrapper: wrapper.(*gethbridge.GethPublicWakuAPIWrapper),
+func newTestPublicWakuAPI(api *wakuv2.PublicWakuAPI) *testPublicWakuAPI {
+	return &testPublicWakuAPI{
+		PublicWakuAPI: api,
 	}
 }
 
-func (tp *testPublicWakuAPIWrapper) Post(ctx context.Context, req types.NewMessage) ([]byte, error) {
-	id, err := tp.GethPublicWakuAPIWrapper.Post(ctx, req)
+func (tp *testPublicWakuAPI) Post(ctx context.Context, req wakutypes.NewMessage) ([]byte, error) {
+	id, err := tp.PublicWakuAPI.Post(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -67,10 +64,10 @@ func (tp *testPublicWakuAPIWrapper) Post(ctx context.Context, req types.NewMessa
 	return id, err
 }
 
-func newTestWakuWrapper(config *waku.Config, logger *zap.Logger) (*testWakuWrapper, error) {
-	if config == nil {
-		config = &waku.DefaultConfig
+func newTestWakuWrapper(logger *zap.Logger) (*testWakuWrapper, error) {
+	w, err := newTestWakuNode(logger)
+	if err != nil {
+		return nil, err
 	}
-	w := waku.New(config, logger)
-	return newTestWaku(w).(*testWakuWrapper), w.Start()
+	return newTestWaku(w.(*wakuv2.Waku)).(*testWakuWrapper), w.Start()
 }

@@ -13,7 +13,6 @@ import (
 	"github.com/status-im/status-go/protocol/communities"
 	"github.com/status-im/status-go/protocol/protobuf"
 	"github.com/status-im/status-go/protocol/requests"
-	"github.com/status-im/status-go/protocol/urls"
 )
 
 const (
@@ -53,6 +52,7 @@ func (s *MessengerShareUrlsSuite) createCommunity() *communities.Community {
 
 func (s *MessengerShareUrlsSuite) createContact() (*Messenger, *Contact) {
 	theirMessenger := s.newMessenger()
+	defer TearDownMessenger(&s.Suite, theirMessenger)
 
 	contactID := types.EncodeHex(crypto.FromECDSAPub(&theirMessenger.identity.PublicKey))
 	ensName := "blah.stateofus.eth"
@@ -112,10 +112,10 @@ func (s *MessengerShareUrlsSuite) TestDecodeEncodeDataURL() {
 	}
 
 	for i := range ts {
-		encodedData, err := urls.EncodeDataURL(ts[i])
+		encodedData, err := encodeDataURL(ts[i])
 		s.Require().NoError(err)
 
-		decodedData, err := urls.DecodeDataURL(encodedData)
+		decodedData, err := decodeDataURL(encodedData)
 		s.Require().NoError(err)
 		s.Require().Equal(ts[i], decodedData)
 	}

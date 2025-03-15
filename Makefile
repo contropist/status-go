@@ -1,4 +1,4 @@
-.PHONY: statusgo statusd-prune all test clean help
+.PHONY: statusgo all test clean help
 .PHONY: statusgo-android statusgo-ios
 
 # Clear any GOROOT set outside of the Nix shell
@@ -29,10 +29,9 @@ help: SHELL := /bin/sh
 help: ##@other Show this help
 	@perl -e '$(HELP_FUN)' $(MAKEFILE_LIST)
 
-RELEASE_TAG:=$(shell ./_assets/scripts/version.sh)
-RELEASE_DIR := /tmp/release-$(RELEASE_TAG)
-GOLANGCI_BINARY=golangci-lint
-IPFS_GATEWAY_URL ?= https://ipfs.status.im/
+RELEASE_TAG ?= $(shell ./_assets/scripts/version.sh)
+RELEASE_DIR ?= /tmp/release-$(RELEASE_TAG)
+GOLANGCI_BINARY = golangci-lint
 
 ifeq ($(OS),Windows_NT)     # is Windows_NT on XP, 2000, 7, Vista, 10...
  detected_OS := Windows
@@ -54,30 +53,20 @@ endif
 CGO_CFLAGS = -I/$(JAVA_HOME)/include -I/$(JAVA_HOME)/include/darwin
 export GOPATH ?= $(HOME)/go
 
-GIT_ROOT := $(dir $(realpath $(lastword $(MAKEFILE_LIST))))
-GIT_COMMIT := $(shell git rev-parse --short HEAD)
-GIT_AUTHOR := $(shell git config user.email || echo $$USER)
+GIT_ROOT ?= $(dir $(realpath $(lastword $(MAKEFILE_LIST))))
+GIT_COMMIT ?= $(shell git rev-parse --short HEAD)
+GIT_AUTHOR ?= $(shell git config user.email || echo $$USER)
 
 ENABLE_METRICS ?= true
 BUILD_TAGS ?= gowaku_no_rln
 
-BUILD_FLAGS ?= -ldflags="-X github.com/status-im/status-go/params.Version=$(RELEASE_TAG:v%=%) \
-	-X github.com/status-im/status-go/params.GitCommit=$(GIT_COMMIT) \
-	-X github.com/status-im/status-go/params.IpfsGatewayURL=$(IPFS_GATEWAY_URL) \
-	-X github.com/status-im/status-go/vendor/github.com/ethereum/go-ethereum/metrics.EnabledStr=$(ENABLE_METRICS)"
-
-BUILD_FLAGS_MOBILE ?= -ldflags="-X github.com/status-im/status-go/params.Version=$(RELEASE_TAG:v%=%) \
-	-X github.com/status-im/status-go/params.GitCommit=$(GIT_COMMIT) \
-	-X github.com/status-im/status-go/params.IpfsGatewayURL=$(IPFS_GATEWAY_URL)"
+BUILD_FLAGS ?= -ldflags="-X github.com/status-im/status-go/vendor/github.com/ethereum/go-ethereum/metrics.EnabledStr=$(ENABLE_METRICS)"
+BUILD_FLAGS_MOBILE ?=
 
 networkid ?= StatusChain
 
 DOCKER_IMAGE_NAME ?= statusteam/status-go
-BOOTNODE_IMAGE_NAME ?= statusteam/bootnode
-STATUSD_PRUNE_IMAGE_NAME ?= statusteam/statusd-prune
-
 DOCKER_IMAGE_CUSTOM_TAG ?= $(RELEASE_TAG)
-
 DOCKER_TEST_WORKDIR = /go/src/github.com/status-im/status-go/
 DOCKER_TEST_IMAGE = golang:1.13
 
@@ -144,6 +133,7 @@ nix-purge: ##@nix Completely remove Nix setup, including /nix directory
 all: $(GO_CMD_NAMES)
 
 .PHONY: $(GO_CMD_NAMES) $(GO_CMD_PATHS) $(GO_CMD_BUILDS)
+$(GO_CMD_BUILDS): generate
 $(GO_CMD_BUILDS): ##@build Build any Go project from cmd folder
 	go build -mod=vendor -v \
 		-tags '$(BUILD_TAGS)' $(BUILD_FLAGS) \
@@ -151,38 +141,31 @@ $(GO_CMD_BUILDS): ##@build Build any Go project from cmd folder
 	echo "Compilation done." ;\
 	echo "Run \"build/bin/$(notdir $@) -h\" to view available commands."
 
-bootnode: ##@build Build discovery v5 bootnode using status-go deps
-bootnode: build/bin/bootnode
-
-node-canary: ##@build Build P2P node canary using status-go deps
-node-canary: build/bin/node-canary
-
 statusgo: ##@build Build status-go as statusd server
 statusgo: build/bin/statusd
 statusd: statusgo
 
-statusd-prune: ##@statusd-prune Build statusd-prune
-statusd-prune: build/bin/statusd-prune
-
-spiff-workflow: ##@build Build node for SpiffWorkflow BPMN software
-spiff-workflow: build/bin/spiff-workflow
-
 status-cli: ##@build Build status-cli to send messages
 status-cli: build/bin/status-cli
 
-statusd-prune-docker-image: SHELL := /bin/sh
-statusd-prune-docker-image: ##@statusd-prune Build statusd-prune docker image
-	@echo "Building docker image for ststusd-prune..."
-	docker build --file _assets/build/Dockerfile-prune . \
-		--label "commit=$(GIT_COMMIT)" \
-		--label "author=$(GIT_AUTHOR)" \
-		-t $(BOOTNODE_IMAGE_NAME):$(DOCKER_IMAGE_CUSTOM_TAG) \
-		-t $(STATUSD_PRUNE_IMAGE_NAME):latest
+status-backend: ##@build Build status-backend to run status-go as HTTP server
+status-backend: build/bin/status-backend
+
+run-status-backend: PORT ?= 0
+run-status-backend: generate
+run-status-backend: ##@run Start status-backend server listening to localhost:PORT
+	go run ./cmd/status-backend --address localhost:${PORT}
 
 statusgo-cross: statusgo-android statusgo-ios
 	@echo "Full cross compilation done."
 	@ls -ld build/bin/statusgo-*
 
+status-go-deps:
+	go install go.uber.org/mock/mockgen@v0.4.0
+	go install github.com/kevinburke/go-bindata/v4/...@v4.0.2
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.34.1
+
+statusgo-android: generate
 statusgo-android: ##@cross-compile Build status-go for Android
 	@echo "Building status-go for Android..."
 	export GO111MODULE=off; \
@@ -191,10 +174,12 @@ statusgo-android: ##@cross-compile Build status-go for Android
 		-target=android -ldflags="-s -w" \
 		-tags '$(BUILD_TAGS) disable_torrent' \
 		$(BUILD_FLAGS_MOBILE) \
+		--androidapi="23" \
 		-o build/bin/statusgo.aar \
 		github.com/status-im/status-go/mobile
 	@echo "Android cross compilation done in build/bin/statusgo.aar"
 
+statusgo-ios: generate
 statusgo-ios: ##@cross-compile Build status-go for iOS
 	@echo "Building status-go for iOS..."
 	export GO111MODULE=off; \
@@ -207,6 +192,7 @@ statusgo-ios: ##@cross-compile Build status-go for iOS
 		github.com/status-im/status-go/mobile
 	@echo "iOS framework cross compilation done in build/bin/Statusgo.xcframework"
 
+statusgo-library: generate
 statusgo-library: ##@cross-compile Build status-go as static library for current platform
 	## cmd/library/README.md explains the magic incantation behind this
 	mkdir -p build/bin/statusgo-lib
@@ -221,6 +207,7 @@ statusgo-library: ##@cross-compile Build status-go as static library for current
 	@echo "Static library built:"
 	@ls -la build/bin/libstatus.*
 
+statusgo-shared-library: generate
 statusgo-shared-library: ##@cross-compile Build status-go as shared library for current platform
 	## cmd/library/README.md explains the magic incantation behind this
 	mkdir -p build/bin/statusgo-lib
@@ -255,47 +242,9 @@ docker-image: ##@docker Build docker image (use DOCKER_IMAGE_NAME to set the ima
 		-t $(DOCKER_IMAGE_NAME):$(DOCKER_IMAGE_CUSTOM_TAG) \
 		-t $(DOCKER_IMAGE_NAME):latest
 
-bootnode-image: SHELL := /bin/sh
-bootnode-image:
-	@echo "Building docker image for bootnode..."
-	docker build --file _assets/build/Dockerfile-bootnode . \
-		--build-arg 'build_tags=$(BUILD_TAGS)' \
-		--build-arg 'build_flags=$(BUILD_FLAGS)' \
-		--label 'commit=$(GIT_COMMIT)' \
-		--label 'author=$(GIT_AUTHOR)' \
-		-t $(BOOTNODE_IMAGE_NAME):$(DOCKER_IMAGE_CUSTOM_TAG) \
-		-t $(BOOTNODE_IMAGE_NAME):latest
-
-push-docker-images: SHELL := /bin/sh
-push-docker-images: docker-image bootnode-image
-	docker push $(BOOTNODE_IMAGE_NAME):$(DOCKER_IMAGE_CUSTOM_TAG)
-	docker push $(DOCKER_IMAGE_NAME):$(DOCKER_IMAGE_CUSTOM_TAG)
-
 clean-docker-images: SHELL := /bin/sh
 clean-docker-images:
 	docker rmi -f $$(docker image ls --filter="reference=$(DOCKER_IMAGE_NAME)" --quiet)
-
-# See https://www.gnu.org/software/make/manual/html_node/Target_002dspecific.html to understand this magic.
-push-docker-images-latest: SHELL := /bin/sh
-push-docker-images-latest: GIT_BRANCH = $(shell git rev-parse --abbrev-ref HEAD)
-push-docker-images-latest: GIT_LOCAL  = $(shell git rev-parse @)
-push-docker-images-latest: GIT_REMOTE = $(shell git fetch -q && git rev-parse remotes/origin/develop || echo 'NO_DEVELOP')
-push-docker-images-latest:
-	echo $(GIT_BRANCH)
-	echo $(GIT_LOCAL)
-	echo $(GIT_REMOTE)
-	@echo "Pushing latest docker images..."
-	@echo "Checking git branch..."
-ifneq ("$(GIT_BRANCH)", "develop")
-	$(error You should only use develop branch to push the latest tag!)
-	exit 1
-endif
-ifneq ("$(GIT_LOCAL)", "$(GIT_REMOTE)")
-	$(error The local git commit does not match the remote origin!)
-	exit 1
-endif
-	docker push $(BOOTNODE_IMAGE_NAME):$(DOCKER_IMAGE_CUSTOM_TAG)
-	docker push $(DOCKER_IMAGE_NAME):$(DOCKER_IMAGE_CUSTOM_TAG)
 
 setup: ##@setup Install all tools
 setup: setup-dev
@@ -304,13 +253,19 @@ setup-dev: ##@setup Install all necessary tools for development
 setup-dev:
 	echo "Replaced by Nix shell. Use 'make shell' or just any target as-is."
 
-generate-handlers:
-	go generate ./_assets/generate_handlers/
-generate: ##@other Regenerate assets and other auto-generated stuff
-	go generate ./static ./static/mailserver_db_migrations ./t ./multiaccounts/... ./appdatabase/... ./protocol/... ./walletdatabase/... ./_assets/generate_handlers
+generate: PACKAGES ?= $$(go list -e ./... | grep -v "/contracts/")
+generate: GO_GENERATE_CMD ?= $$(which go-generate-fast || echo 'go generate')
+generate: export GO_GENERATE_FAST_DEBUG ?= false
+generate: export GO_GENERATE_FAST_RECACHE ?= false
+generate:  ##@ Run generate for all given packages using go-generate-fast, fallback to `go generate` (e.g. for docker)
+	@GOROOT=$$(go env GOROOT) $(GO_GENERATE_CMD) $(PACKAGES)
 
-generate-appdatabase:
-	go generate ./appdatabase/...
+generate-contracts:
+	go generate ./contracts
+download-tokens:
+	go run ./services/wallet/token/downloader/main.go
+analyze-token-stores:
+	go run ./services/wallet/token/analyzer/main.go
 
 prepare-release: clean-release
 	mkdir -p $(RELEASE_DIR)
@@ -330,51 +285,42 @@ lint-fix:
 		-and -not -name 'bindata*' \
 		-and -not -name 'migrations.go' \
 		-and -not -name 'messenger_handlers.go' \
+		-and -not -name '*/mock/*' \
+		-and -not -name 'mock.go' \
 		-and -not -wholename '*/vendor/*' \
 		-exec goimports \
 		-local 'github.com/ethereum/go-ethereum,github.com/status-im/status-go,github.com/status-im/markdown' \
 		-w {} \;
 	$(MAKE) vendor
 
-mock: ##@other Regenerate mocks
-	mockgen -package=fake         -destination=transactions/fake/mock.go             -source=transactions/fake/txservice.go
-	mockgen -package=status       -destination=services/status/account_mock.go       -source=services/status/service.go
-	mockgen -package=peer         -destination=services/peer/discoverer_mock.go      -source=services/peer/service.go
-	mockgen -package=mock_transactor -destination=transactions/mock_transactor/transactor.go   -source=transactions/transactor.go
-	mockgen -package=mock_pathprocessor     -destination=services/wallet/router/pathprocessor/mock_pathprocessor/processor.go -source=services/wallet/router/pathprocessor/processor.go
-	mockgen -package=mock_bridge     -destination=services/wallet/bridge/mock_bridge/bridge.go -source=services/wallet/bridge/bridge.go
-	mockgen -package=mock_client     -destination=rpc/chain/mock/client/client.go              -source=rpc/chain/client.go
-	mockgen -package=mock_token      -destination=services/wallet/token/mock/token/tokenmanager.go -source=services/wallet/token/token.go
-	mockgen -package=mock_thirdparty -destination=services/wallet/thirdparty/mock/types.go -source=services/wallet/thirdparty/types.go
-	mockgen -package=mock_balance_persistence -destination=services/wallet/token/mock/balance_persistence/balance_persistence.go -source=services/wallet/token/balance_persistence.go
-	mockgen -package=mock_network      -destination=rpc/network/mock/network.go -source=rpc/network/network.go
-	mockgen -package=mock_rpcclient     -destination=rpc/mock/client/client.go              -source=rpc/client.go
-	mockgen -package=mock_collectibles -destination=services/wallet/collectibles/mock/collection_data_db.go -source=services/wallet/collectibles/collection_data_db.go
-	mockgen -package=mock_collectibles -destination=services/wallet/collectibles/mock/collectible_data_db.go -source=services/wallet/collectibles/collectible_data_db.go
-	mockgen -package=mock_thirdparty -destination=services/wallet/thirdparty/mock/collectible_types.go -source=services/wallet/thirdparty/collectible_types.go
-	mockgen -package=mock_paraswap -destination=services/wallet/thirdparty/paraswap/mock/types.go -source=services/wallet/thirdparty/paraswap/types.go
-	mockgen -package=mock_onramp -destination=services/wallet/onramp/mock/types.go -source=services/wallet/onramp/types.go
-
 docker-test: ##@tests Run tests in a docker container with golang.
 	docker run --privileged --rm -it -v "$(PWD):$(DOCKER_TEST_WORKDIR)" -w "$(DOCKER_TEST_WORKDIR)" $(DOCKER_TEST_IMAGE) go test ${ARGS}
 
 test: test-unit ##@tests Run basic, short tests during development
 
-test-unit: export BUILD_TAGS ?=
-test-unit: export UNIT_TEST_COUNT ?= 1
-test-unit: export UNIT_TEST_FAILFAST ?= true
+test-unit-prep: generate
+test-unit-prep: export BUILD_TAGS ?=
+test-unit-prep: export UNIT_TEST_DRY_RUN ?= false
+test-unit-prep: export UNIT_TEST_COUNT ?= 1
+test-unit-prep: export UNIT_TEST_FAILFAST ?= true
+test-unit-prep: export UNIT_TEST_USE_DEVELOPMENT_LOGGER ?= true
+test-unit-prep: export UNIT_TEST_REPORT_CODECOV ?= false
+
+test-unit: test-unit-prep
 test-unit: export UNIT_TEST_RERUN_FAILS ?= true
-test-unit: export UNIT_TEST_USE_DEVELOPMENT_LOGGER ?= true
-test-unit: export UNIT_TEST_REPORT_CODECLIMATE ?= false
-test-unit: export UNIT_TEST_PACKAGES ?= $(call sh, go list ./... | grep -E '/waku(/.*|$$)|/wakuv2(/.*|$$)') \
-	$(call sh, go list ./... | \
+test-unit: export UNIT_TEST_PACKAGES ?= $(call sh, go list ./... | \
 	grep -v /vendor | \
 	grep -v /t/e2e | \
 	grep -v /t/benchmarks | \
 	grep -v /transactions/fake | \
-	grep -E -v '/waku(/.*|$$)' | \
-	grep -E -v '/wakuv2(/.*|$$)')
+	grep -v /tests-unit-network)
 test-unit: ##@tests Run unit and integration tests
+	./_assets/scripts/run_unit_tests.sh
+
+test-unit-network: test-unit-prep
+test-unit-network: export UNIT_TEST_RERUN_FAILS ?= false
+test-unit-network: export UNIT_TEST_PACKAGES ?= $(call sh, go list ./tests-unit-network/...)
+test-unit-network: ##@tests Run unit and integration tests with network access
 	./_assets/scripts/run_unit_tests.sh
 
 test-unit-race: export GOTEST_EXTRAFLAGS=-race
@@ -387,16 +333,21 @@ test-e2e: ##@tests Run e2e tests
 test-e2e-race: export GOTEST_EXTRAFLAGS=-race
 test-e2e-race: test-e2e ##@tests Run e2e tests with -race flag
 
-canary-test: node-canary
-	# TODO: uncomment that!
-	#_assets/scripts/canary_test_mailservers.sh ./config/cli/fleet-eth.prod.json
+test-functional: generate
+test-functional: export FUNCTIONAL_TESTS_DOCKER_UID ?= $(call sh, id -u)
+test-functional: export FUNCTIONAL_TESTS_REPORT_CODECOV ?= false
+test-functional:
+	@./_assets/scripts/run_functional_tests.sh
 
-lint:
+lint-panics: generate
+	go run ./cmd/lint-panics -root="$(call sh, pwd)" -skip=./cmd -test=false ./...
+
+lint: generate lint-panics
 	golangci-lint run ./...
 
-ci: lint canary-test test-unit test-e2e ##@tests Run all linters and tests at once
+ci: generate lint test-unit test-e2e ##@tests Run all linters and tests at once
 
-ci-race: lint canary-test test-unit test-e2e-race ##@tests Run all linters and tests at once + race
+ci-race: generate lint test-unit test-e2e-race ##@tests Run all linters and tests at once + race
 
 clean: ##@other Cleanup
 	rm -fr build/bin/* mailserver-config.json
@@ -410,7 +361,7 @@ deep-clean: clean git-clean
 tidy:
 	go mod tidy
 
-vendor:
+vendor: generate
 	go mod tidy
 	go mod vendor
 	modvendor -copy="**/*.c **/*.h" -v
@@ -422,30 +373,6 @@ update-fleet-config: ##@other Update fleets configuration from fleets.status.im
 	@go generate ./static
 	@echo "Done"
 
-run-bootnode-systemd: ##@Easy way to run a bootnode locally with Docker Compose
-	@cd _assets/systemd/bootnode && $(MAKE)
-
-run-bootnode-docker: ##@Easy way to run a bootnode locally with Docker Compose
-	@cd _assets/compose/bootnode && $(MAKE)
-
-run-mailserver-systemd: ##@Easy Run a mailserver locally with systemd
-	@cd _assets/systemd/mailserver && $(MAKE)
-
-run-mailserver-docker: ##@Easy Run a mailserver locally with Docker Compose
-	@cd _assets/compose/mailserver && $(MAKE)
-
-clean-bootnode-systemd: ##@Easy Clean your systemd service for running a bootnode
-	@cd _assets/systemd/bootnode && $(MAKE) clean
-
-clean-bootnode-docker: ##@Easy Clean your Docker container running a bootnode
-	@cd _assets/compose/bootnode && $(MAKE) clean
-
-clean-mailserver-systemd: ##@Easy Clean your systemd service for running a mailserver
-	@cd _assets/systemd/mailserver && $(MAKE) clean
-
-clean-mailserver-docker: ##@Easy Clean your Docker container running a mailserver
-	@cd _assets/compose/mailserver && $(MAKE) clean
-
 migration: DEFAULT_MIGRATION_PATH := appdatabase/migrations/sql
 migration:
 	touch $(DEFAULT_MIGRATION_PATH)/$$(date '+%s')_$(D).up.sql
@@ -453,8 +380,13 @@ migration:
 migration-check:
 	bash _assets/scripts/migration_check.sh
 
+commit-check: SHELL := /bin/sh
 commit-check:
-	bash _assets/scripts/commit_check.sh
+	@bash _assets/scripts/commit_check.sh
+
+version: SHELL := /bin/sh
+version:
+	@./_assets/scripts/version.sh
 
 tag-version:
 	bash _assets/scripts/tag_version.sh $(TARGET_COMMIT)
@@ -463,6 +395,7 @@ migration-wallet: DEFAULT_WALLET_MIGRATION_PATH := walletdatabase/migrations/sql
 migration-wallet:
 	touch $(DEFAULT_WALLET_MIGRATION_PATH)/$$(date +%s)_$(D).up.sql
 
+install-git-hooks: SHELL := /bin/sh
 install-git-hooks:
 	@ln -sf $(if $(filter $(detected_OS), Linux),-r,) \
 		$(GIT_ROOT)/_assets/hooks/* $(GIT_ROOT)/.git/hooks
@@ -487,16 +420,18 @@ build-verif-proxy-wrapper:
 test-verif-proxy-wrapper:
 	CGO_CFLAGS="$(CGO_CFLAGS)" go test -v github.com/status-im/status-go/rpc -tags gowaku_skip_migrations,nimbus_light_client -run ^TestProxySuite$$ -testify.m TestRun -ldflags $(LDFLAGS)
 
-
-run-integration-tests: SHELL := /bin/sh
-run-integration-tests: export INTEGRATION_TESTS_DOCKER_UID ?= $(shell id -u $$USER)
-run-integration-tests:
-	docker-compose -f integration-tests/docker-compose.anvil.yml -f integration-tests/docker-compose.test.status-go.yml up -d --build --remove-orphans; \
-	docker-compose -f integration-tests/docker-compose.anvil.yml -f integration-tests/docker-compose.test.status-go.yml logs -f tests-rpc; \
-	exit_code=$$(docker inspect integration-tests_tests-rpc_1 -f '{{.State.ExitCode}}'); \
-	docker-compose -f integration-tests/docker-compose.anvil.yml -f integration-tests/docker-compose.test.status-go.yml down; \
-	exit $$exit_code
-
 run-anvil: SHELL := /bin/sh
 run-anvil:
-	docker-compose -f integration-tests/docker-compose.anvil.yml up --remove-orphans
+	@docker compose \
+		-f tests-functional/docker-compose.anvil.yml \
+		-f tests-functional/docker-compose.anvil.dev.yml \
+		up --remove-orphans
+
+codecov-validate: SHELL := /bin/sh
+codecov-validate:
+	curl -X POST --data-binary @.codecov.yml https://codecov.io/validate
+
+.PHONY: pytest-lint
+pytest-lint:
+	@echo "Running python linting on all files..."
+	pre-commit run --all-files --verbose --config tests-functional/.pre-commit-config.yaml

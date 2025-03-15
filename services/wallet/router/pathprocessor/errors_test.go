@@ -7,6 +7,8 @@ import (
 
 	s_errors "github.com/status-im/status-go/errors"
 
+	"github.com/status-im/status-go/services/wallet/router/pathprocessor/common"
+
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,17 +17,17 @@ func TestPlainError(t *testing.T) {
 	err := errors.New(errString)
 
 	processorNames := []string{
-		ProcessorTransferName,
-		ProcessorTransferName,
-		ProcessorBridgeHopName,
-		ProcessorBridgeCelerName,
-		ProcessorSwapParaswapName,
-		ProcessorERC721Name,
-		ProcessorERC1155Name,
-		ProcessorENSRegisterName,
-		ProcessorENSReleaseName,
-		ProcessorENSPublicKeyName,
-		ProcessorStickersBuyName,
+		common.ProcessorTransferName,
+		common.ProcessorTransferName,
+		common.ProcessorBridgeHopName,
+		common.ProcessorBridgeCelerName,
+		common.ProcessorSwapParaswapName,
+		common.ProcessorERC721Name,
+		common.ProcessorERC1155Name,
+		common.ProcessorENSRegisterName,
+		common.ProcessorENSReleaseName,
+		common.ProcessorENSPublicKeyName,
+		common.ProcessorStickersBuyName,
 	}
 
 	for _, processorName := range processorNames {
@@ -62,7 +64,7 @@ func TestNonGenericErrorResponse(t *testing.T) {
 		Details: "Not Generic Error Response",
 	}
 	err := s_errors.CreateErrorResponseFromError(errResp)
-	ppErrResp := createErrorResponse(ProcessorTransferName, err)
+	ppErrResp := createErrorResponse(common.ProcessorTransferName, err)
 
 	castPPErrResp := ppErrResp.(*s_errors.ErrorResponse)
 	require.Equal(t, errResp.Code, castPPErrResp.Code)

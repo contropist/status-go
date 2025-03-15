@@ -9,12 +9,11 @@ import (
 
 	"github.com/status-im/status-go/multiaccounts/common"
 
-	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
 	"github.com/status-im/status-go/eth-node/crypto"
-	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/protocol/encryption/multidevice"
 	"github.com/status-im/status-go/protocol/tt"
-	"github.com/status-im/status-go/waku"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 func TestMessengerAccountCustomizationColor(t *testing.T) {
@@ -27,18 +26,17 @@ type MessengerSyncAccountCustomizationColorSuite struct {
 	alice2 *Messenger
 	// If one wants to send messages between different instances of Messenger,
 	// a single Waku service should be shared.
-	shh    types.Waku
+	shh    wakutypes.Waku
 	logger *zap.Logger
 }
 
 func (s *MessengerSyncAccountCustomizationColorSuite) SetupTest() {
 	s.logger = tt.MustCreateTestLogger()
 
-	config := waku.DefaultConfig
-	config.MinimumAcceptedPoW = 0
-	shh := waku.New(&config, s.logger)
-	s.shh = gethbridge.NewGethWakuWrapper(shh)
+	shh, err := newTestWakuNode(s.logger)
+	s.Require().NoError(err)
 	s.Require().NoError(shh.Start())
+	s.shh = shh
 
 	pk, err := crypto.GenerateKey()
 	s.Require().NoError(err)

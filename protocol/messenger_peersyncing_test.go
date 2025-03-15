@@ -9,19 +9,18 @@ import (
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/zap"
 
-	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
 	"github.com/status-im/status-go/eth-node/crypto"
-	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/protocol/common"
 	"github.com/status-im/status-go/protocol/communities"
 	"github.com/status-im/status-go/protocol/peersyncing"
 	"github.com/status-im/status-go/protocol/protobuf"
 	"github.com/status-im/status-go/protocol/tt"
-	"github.com/status-im/status-go/waku"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 func TestMessengerPeersyncingSuite(t *testing.T) {
-	t.SkipNow() // FIXME
+	t.Skip("broken test") // FIXME
 	suite.Run(t, new(MessengerPeersyncingSuite))
 }
 
@@ -32,7 +31,7 @@ type MessengerPeersyncingSuite struct {
 	alice *Messenger
 	// If one wants to send messages between different instances of Messenger,
 	// a single Waku service should be shared.
-	shh               types.Waku
+	shh               wakutypes.Waku
 	logger            *zap.Logger
 	accountsTestData  map[string][]string
 	accountsPasswords map[string]string
@@ -42,11 +41,10 @@ func (s *MessengerPeersyncingSuite) SetupTest() {
 	s.logger = tt.MustCreateTestLogger()
 	peerSyncingLoopInterval = 500 * time.Millisecond
 
-	config := waku.DefaultConfig
-	config.MinimumAcceptedPoW = 0
-	shh := waku.New(&config, s.logger)
-	s.shh = gethbridge.NewGethWakuWrapper(shh)
+	shh, err := newTestWakuNode(s.logger)
+	s.Require().NoError(err)
 	s.Require().NoError(shh.Start())
+	s.shh = shh
 
 	s.owner = s.newMessenger()
 	s.bob = s.newMessenger()
@@ -66,7 +64,7 @@ func (s *MessengerPeersyncingSuite) SetupTest() {
 	s.accountsPasswords[common.PubkeyToHex(&s.bob.identity.PublicKey)] = bobPassword
 	s.accountsPasswords[common.PubkeyToHex(&s.alice.identity.PublicKey)] = aliceAddress1
 
-	_, err := s.owner.Start()
+	_, err = s.owner.Start()
 	s.Require().NoError(err)
 	_, err = s.bob.Start()
 	s.Require().NoError(err)

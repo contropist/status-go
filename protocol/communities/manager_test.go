@@ -16,7 +16,6 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/status-im/status-go/appdatabase"
 	"github.com/status-im/status-go/eth-node/crypto"
-	"github.com/status-im/status-go/eth-node/types"
 	userimages "github.com/status-im/status-go/images"
 	"github.com/status-im/status-go/params"
 	"github.com/status-im/status-go/protocol/common"
@@ -29,8 +28,9 @@ import (
 	"github.com/status-im/status-go/services/wallet/bigint"
 	walletCommon "github.com/status-im/status-go/services/wallet/common"
 	"github.com/status-im/status-go/services/wallet/thirdparty"
-	"github.com/status-im/status-go/services/wallet/token"
+	tokenTypes "github.com/status-im/status-go/services/wallet/token/types"
 	"github.com/status-im/status-go/t/helpers"
+	wakutypes "github.com/status-im/status-go/waku/types"
 
 	"github.com/golang/protobuf/proto"
 	_ "github.com/mutecomm/go-sqlcipher/v4" // require go-sqlcipher that overrides default implementation
@@ -201,7 +201,7 @@ func (m *testTokenManager) GetCachedBalancesByChain(ctx context.Context, account
 	return m.response, nil
 }
 
-func (m *testTokenManager) FindOrCreateTokenByAddress(ctx context.Context, chainID uint64, address gethcommon.Address) *token.Token {
+func (m *testTokenManager) FindOrCreateTokenByAddress(ctx context.Context, chainID uint64, address gethcommon.Address) *tokenTypes.Token {
 	return nil
 }
 
@@ -410,6 +410,7 @@ func (s *ManagerSuite) TestEditCommunity() {
 		Name:        "status",
 		Description: "status community description",
 		Membership:  protobuf.CommunityPermissions_AUTO_ACCEPT,
+		Image:       "../../_assets/tests/elephant.jpg",
 	}
 
 	community, err := s.manager.CreateCommunity(createRequest, true)
@@ -421,12 +422,19 @@ func (s *ManagerSuite) TestEditCommunity() {
 		CreateCommunity: requests.CreateCommunity{
 			Name:        "statusEdited",
 			Description: "status community description edited",
+			Image:       "../../_assets/tests/status.png",
+			ImageBx:     5,
+			ImageBy:     5,
 		},
 	}
 
 	updatedCommunity, err := s.manager.EditCommunity(update)
 	s.Require().NoError(err)
 	s.Require().NotNil(updatedCommunity)
+	// Make sure the version of the image got updated with the new image
+	communityImageVersion, ok := s.manager.communityImageVersions[community.IDString()]
+	s.Require().True(ok)
+	s.Require().Equal(uint32(1), communityImageVersion)
 
 	//ensure updated community successfully stored
 	communities, err := s.manager.All()
@@ -438,10 +446,10 @@ func (s *ManagerSuite) TestEditCommunity() {
 		storedCommunity = communities[0]
 	}
 
-	s.Require().Equal(storedCommunity.ID(), updatedCommunity.ID())
-	s.Require().Equal(storedCommunity.PrivateKey(), updatedCommunity.PrivateKey())
-	s.Require().Equal(storedCommunity.config.CommunityDescription.Identity.DisplayName, update.CreateCommunity.Name)
-	s.Require().Equal(storedCommunity.config.CommunityDescription.Identity.Description, update.CreateCommunity.Description)
+	s.Require().Equal(updatedCommunity.ID(), storedCommunity.ID())
+	s.Require().Equal(updatedCommunity.PrivateKey(), storedCommunity.PrivateKey())
+	s.Require().Equal(update.CreateCommunity.Name, storedCommunity.config.CommunityDescription.Identity.DisplayName)
+	s.Require().Equal(update.CreateCommunity.Description, storedCommunity.config.CommunityDescription.Identity.Description)
 }
 
 func (s *ManagerSuite) TestGetControlledCommunitiesChatIDs() {
@@ -552,8 +560,8 @@ func (s *ManagerSuite) TestCreateHistoryArchiveTorrent_WithoutMessages() {
 	community, chatID, err := s.buildCommunityWithChat()
 	s.Require().NoError(err)
 
-	topic := types.BytesToTopic(transport.ToTopic(chatID))
-	topics := []types.TopicType{topic}
+	topic := wakutypes.BytesToTopic(transport.ToTopic(chatID))
+	topics := []wakutypes.TopicType{topic}
 
 	// Time range of 7 days
 	startDate := time.Date(2020, 1, 1, 00, 00, 00, 0, time.UTC)
@@ -578,8 +586,8 @@ func (s *ManagerSuite) TestCreateHistoryArchiveTorrent_ShouldCreateArchive() {
 	community, chatID, err := s.buildCommunityWithChat()
 	s.Require().NoError(err)
 
-	topic := types.BytesToTopic(transport.ToTopic(chatID))
-	topics := []types.TopicType{topic}
+	topic := wakutypes.BytesToTopic(transport.ToTopic(chatID))
+	topics := []wakutypes.TopicType{topic}
 
 	// Time range of 7 days
 	startDate := time.Date(2020, 1, 1, 00, 00, 00, 0, time.UTC)
@@ -632,8 +640,8 @@ func (s *ManagerSuite) TestCreateHistoryArchiveTorrent_ShouldCreateMultipleArchi
 	community, chatID, err := s.buildCommunityWithChat()
 	s.Require().NoError(err)
 
-	topic := types.BytesToTopic(transport.ToTopic(chatID))
-	topics := []types.TopicType{topic}
+	topic := wakutypes.BytesToTopic(transport.ToTopic(chatID))
+	topics := []wakutypes.TopicType{topic}
 
 	// Time range of 3 weeks
 	startDate := time.Date(2020, 1, 1, 00, 00, 00, 0, time.UTC)
@@ -691,8 +699,8 @@ func (s *ManagerSuite) TestCreateHistoryArchiveTorrent_ShouldAppendArchives() {
 	community, chatID, err := s.buildCommunityWithChat()
 	s.Require().NoError(err)
 
-	topic := types.BytesToTopic(transport.ToTopic(chatID))
-	topics := []types.TopicType{topic}
+	topic := wakutypes.BytesToTopic(transport.ToTopic(chatID))
+	topics := []wakutypes.TopicType{topic}
 
 	// Time range of 1 week
 	startDate := time.Date(2020, 1, 1, 00, 00, 00, 0, time.UTC)
@@ -731,8 +739,8 @@ func (s *ManagerSuite) TestCreateHistoryArchiveTorrentFromMessages() {
 	community, chatID, err := s.buildCommunityWithChat()
 	s.Require().NoError(err)
 
-	topic := types.BytesToTopic(transport.ToTopic(chatID))
-	topics := []types.TopicType{topic}
+	topic := wakutypes.BytesToTopic(transport.ToTopic(chatID))
+	topics := []wakutypes.TopicType{topic}
 
 	// Time range of 7 days
 	startDate := time.Date(2020, 1, 1, 00, 00, 00, 0, time.UTC)
@@ -746,7 +754,7 @@ func (s *ManagerSuite) TestCreateHistoryArchiveTorrentFromMessages() {
 	// be part of the archive
 	message3 := buildMessage(endDate.Add(2*time.Hour), topic, []byte{3})
 
-	_, err = s.archiveManager.CreateHistoryArchiveTorrentFromMessages(community.ID(), []*types.Message{&message1, &message2, &message3}, topics, startDate, endDate, partition, false)
+	_, err = s.archiveManager.CreateHistoryArchiveTorrentFromMessages(community.ID(), []*wakutypes.Message{&message1, &message2, &message3}, topics, startDate, endDate, partition, false)
 	s.Require().NoError(err)
 
 	_, err = os.Stat(s.archiveManager.archiveDataFile(community.IDString()))
@@ -778,8 +786,8 @@ func (s *ManagerSuite) TestCreateHistoryArchiveTorrentFromMessages_ShouldCreateM
 	community, chatID, err := s.buildCommunityWithChat()
 	s.Require().NoError(err)
 
-	topic := types.BytesToTopic(transport.ToTopic(chatID))
-	topics := []types.TopicType{topic}
+	topic := wakutypes.BytesToTopic(transport.ToTopic(chatID))
+	topics := []wakutypes.TopicType{topic}
 
 	// Time range of 3 weeks
 	startDate := time.Date(2020, 1, 1, 00, 00, 00, 0, time.UTC)
@@ -795,7 +803,7 @@ func (s *ManagerSuite) TestCreateHistoryArchiveTorrentFromMessages_ShouldCreateM
 	// This one should end up in the third archive
 	message4 := buildMessage(startDate.Add(14*24*time.Hour), topic, []byte{4})
 
-	_, err = s.archiveManager.CreateHistoryArchiveTorrentFromMessages(community.ID(), []*types.Message{&message1, &message2, &message3, &message4}, topics, startDate, endDate, partition, false)
+	_, err = s.archiveManager.CreateHistoryArchiveTorrentFromMessages(community.ID(), []*wakutypes.Message{&message1, &message2, &message3, &message4}, topics, startDate, endDate, partition, false)
 	s.Require().NoError(err)
 
 	index, err := s.archiveManager.LoadHistoryArchiveIndexFromFile(s.manager.identity, community.ID())
@@ -828,8 +836,8 @@ func (s *ManagerSuite) TestCreateHistoryArchiveTorrentFromMessages_ShouldAppendA
 	community, chatID, err := s.buildCommunityWithChat()
 	s.Require().NoError(err)
 
-	topic := types.BytesToTopic(transport.ToTopic(chatID))
-	topics := []types.TopicType{topic}
+	topic := wakutypes.BytesToTopic(transport.ToTopic(chatID))
+	topics := []wakutypes.TopicType{topic}
 
 	// Time range of 1 week
 	startDate := time.Date(2020, 1, 1, 00, 00, 00, 0, time.UTC)
@@ -839,7 +847,7 @@ func (s *ManagerSuite) TestCreateHistoryArchiveTorrentFromMessages_ShouldAppendA
 
 	message1 := buildMessage(startDate.Add(1*time.Hour), topic, []byte{1})
 
-	_, err = s.archiveManager.CreateHistoryArchiveTorrentFromMessages(community.ID(), []*types.Message{&message1}, topics, startDate, endDate, partition, false)
+	_, err = s.archiveManager.CreateHistoryArchiveTorrentFromMessages(community.ID(), []*wakutypes.Message{&message1}, topics, startDate, endDate, partition, false)
 	s.Require().NoError(err)
 
 	index, err := s.archiveManager.LoadHistoryArchiveIndexFromFile(s.manager.identity, community.ID())
@@ -852,7 +860,7 @@ func (s *ManagerSuite) TestCreateHistoryArchiveTorrentFromMessages_ShouldAppendA
 
 	message2 := buildMessage(startDate.Add(2*time.Hour), topic, []byte{2})
 
-	_, err = s.archiveManager.CreateHistoryArchiveTorrentFromMessages(community.ID(), []*types.Message{&message2}, topics, startDate, endDate, partition, false)
+	_, err = s.archiveManager.CreateHistoryArchiveTorrentFromMessages(community.ID(), []*wakutypes.Message{&message2}, topics, startDate, endDate, partition, false)
 	s.Require().NoError(err)
 
 	index, err = s.archiveManager.LoadHistoryArchiveIndexFromFile(s.manager.identity, community.ID())
@@ -868,8 +876,8 @@ func (s *ManagerSuite) TestSeedHistoryArchiveTorrent() {
 	community, chatID, err := s.buildCommunityWithChat()
 	s.Require().NoError(err)
 
-	topic := types.BytesToTopic(transport.ToTopic(chatID))
-	topics := []types.TopicType{topic}
+	topic := wakutypes.BytesToTopic(transport.ToTopic(chatID))
+	topics := []wakutypes.TopicType{topic}
 
 	startDate := time.Date(2020, 1, 1, 00, 00, 00, 0, time.UTC)
 	endDate := time.Date(2020, 1, 7, 00, 00, 00, 0, time.UTC)
@@ -902,8 +910,8 @@ func (s *ManagerSuite) TestUnseedHistoryArchiveTorrent() {
 	community, chatID, err := s.buildCommunityWithChat()
 	s.Require().NoError(err)
 
-	topic := types.BytesToTopic(transport.ToTopic(chatID))
-	topics := []types.TopicType{topic}
+	topic := wakutypes.BytesToTopic(transport.ToTopic(chatID))
+	topics := []wakutypes.TopicType{topic}
 
 	startDate := time.Date(2020, 1, 1, 00, 00, 00, 0, time.UTC)
 	endDate := time.Date(2020, 1, 7, 00, 00, 00, 0, time.UTC)
@@ -1619,8 +1627,8 @@ func buildTorrentConfig() *params.TorrentConfig {
 	}
 }
 
-func buildMessage(timestamp time.Time, topic types.TopicType, hash []byte) types.Message {
-	message := types.Message{
+func buildMessage(timestamp time.Time, topic wakutypes.TopicType, hash []byte) wakutypes.Message {
+	message := wakutypes.Message{
 		Sig:       []byte{1},
 		Timestamp: uint32(timestamp.Unix()),
 		Topic:     topic,
@@ -2144,4 +2152,28 @@ func (s *ManagerSuite) TestDetermineChannelsForHRKeysRequest() {
 	s.Require().NoError(err)
 	s.Require().Len(channels, 1)
 	s.Require().Equal("channel-id", channels[0])
+}
+
+// Covers solution for: https://github.com/status-im/status-desktop/issues/16226
+func (s *ManagerSuite) TestCommunityIDIsHydratedWhenMarshaling() {
+	request := &requests.CreateCommunity{
+		Name:        "status",
+		Description: "description",
+		Membership:  protobuf.CommunityPermissions_AUTO_ACCEPT,
+	}
+
+	community, err := s.manager.CreateCommunity(request, true)
+	s.Require().NoError(err)
+	s.Require().NotNil(community)
+
+	// Simulate legacy community that wasn't aware of ID field in `CommunityDescription` protobuf
+	community.config.CommunityDescription.ID = ""
+
+	// The fix is applied when community is marshaled, effectively hydrating empty ID
+	err = s.manager.SaveCommunity(community)
+	s.Require().NoError(err)
+
+	community, err = s.manager.GetByID(community.ID())
+	s.Require().NoError(err)
+	s.Require().Equal(community.IDString(), community.config.CommunityDescription.ID)
 }

@@ -1,8 +1,8 @@
 #!/usr/bin/env groovy
-library 'status-jenkins-lib@v1.9.6'
+library 'status-jenkins-lib@v1.9.20'
 
 pipeline {
-  agent { label 'linux && x86_64 && nix-2.19' }
+  agent { label 'linux && x86_64 && nix-2.24' }
 
   parameters {
     string(
@@ -17,23 +17,28 @@ pipeline {
     )
     booleanParam(
       name: 'UNIT_TEST_FAILFAST',
-      defaultValue: !isTestNightlyJob(),
+      defaultValue: isPRJob(),
       description: 'Should the job fail fast on first test failure?'
     )
     booleanParam(
       name: 'UNIT_TEST_RERUN_FAILS',
-      defaultValue: !isTestNightlyJob(),
+      defaultValue: !isNightlyJob(),
       description: 'Should the job rerun failed tests?'
     )
     booleanParam(
       name: 'UNIT_TEST_USE_DEVELOPMENT_LOGGER',
-      defaultValue: !isTestNightlyJob(),
+      defaultValue: !isNightlyJob(),
       description: 'Should the job use detailed logging for tests, potentially generating large logs?'
     )
     booleanParam(
-      name: 'UNIT_TEST_REPORT_CODECLIMATE',
-      defaultValue: true,
-      description: 'Should the job report test coverage to CodeClimate?'
+      name: 'UNIT_TEST_REPORT_CODECOV',
+      defaultValue: !isNightlyJob(),
+      description: 'Should the job report test coverage to Codecov?'
+    )
+    booleanParam(
+      name: 'UNIT_TEST_DRY_RUN',
+      defaultValue: false,
+      description: 'Should the job report ignore the actual test run and just print the test plan?'
     )
   }
 
@@ -45,16 +50,16 @@ pipeline {
     disableConcurrentBuilds()
     /* manage how many builds we keep */
     buildDiscarder(logRotator(
-      numToKeepStr: isTestNightlyJob() ? '14' : '5',
-      daysToKeepStr: '30',
-      artifactNumToKeepStr: isTestNightlyJob() ? '14' : '1',
+      numToKeepStr: getAmountToKeep(),
+      daysToKeepStr: '-1',
+      artifactNumToKeepStr: getAmountToKeep(),
     ))
   }
 
   environment {
     PLATFORM    = 'tests'
     DB_CONT     = "status-go-test-db-${env.EXECUTOR_NUMBER.toInteger() + 1}"
-    DB_PORT     = "${5432 + env.EXECUTOR_NUMBER.toInteger()}"
+    DB_PORT     = "${54321 + env.EXECUTOR_NUMBER.toInteger()}"
     TMPDIR      = "${WORKSPACE_TMP}"
     GOPATH      = "${WORKSPACE_TMP}/go"
     GOCACHE     = "${WORKSPACE_TMP}/gocache"
@@ -71,7 +76,11 @@ pipeline {
     UNIT_TEST_FAILFAST =               "${params.UNIT_TEST_FAILFAST}"
     UNIT_TEST_RERUN_FAILS =            "${params.UNIT_TEST_RERUN_FAILS}"
     UNIT_TEST_USE_DEVELOPMENT_LOGGER = "${params.UNIT_TEST_USE_DEVELOPMENT_LOGGER}"
-    UNIT_TEST_REPORT_CODECLIMATE =     "${params.UNIT_TEST_REPORT_CODECLIMATE}"
+    UNIT_TEST_REPORT_CODECOV =         "${params.UNIT_TEST_REPORT_CODECOV}"
+    UNIT_TEST_DRY_RUN =                "${params.UNIT_TEST_DRY_RUN}"
+
+    /* prevent sharing cache dir across different jobs */
+    GO_GENERATE_FAST_DIR = "${env.WORKSPACE_TMP}/go-generate-fast"
   }
 
   stages {
@@ -80,6 +89,12 @@ pipeline {
         sh "mkdir -p \$(dirname ${REPO_SRC})"
         sh "ln -s ${WORKSPACE} ${REPO_SRC}"
       }
+    }
+
+    stage('Generate') {
+      steps { script {
+        nix.shell('make generate', pure: false)
+      } }
     }
 
     stage('Vendor Check') {
@@ -92,34 +107,16 @@ pipeline {
 
     stage('Migration') {
       when { // https://github.com/status-im/status-go/issues/4993#issuecomment-2022685544
-        expression { !isTestNightlyJob() }
+        expression { isPRJob() }
       }
       steps { script {
         nix.shell('make migration-check', pure: false)
       } }
     }
 
-    stage('Commit') {
-      environment {
-        BASE_BRANCH = "${env.BASE_BRANCH}"
-      }
-      when { // https://github.com/status-im/status-go/issues/4993#issuecomment-2022685544
-        expression { !isTestNightlyJob() }
-      }
-      steps { script {
-        nix.shell('make commit-check', pure: false)
-      } }
-    }
-
     stage('Lint') {
       steps { script {
         nix.shell('make lint', pure: true)
-      } }
-    }
-
-    stage('Canary') {
-      steps { script {
-        nix.shell('make canary-test', pure: true)
       } }
     }
 
@@ -154,17 +151,15 @@ pipeline {
             "--filter",
             "--lightpush"
           ].join(' ')) { c2 ->
-            nix.shell('make generate-handlers', pure: true)
             withCredentials([
               string(
-                credentialsId: 'codeclimate-test-reporter-id',
-                variable: 'CC_TEST_REPORTER_ID'
+                credentialsId: 'codecov-repository-upload-token',
+                variable: 'CODECOV_TOKEN'
               ),
             ]) {
               nix.shell('make test-unit V=1', pure: false)
             }
-            sh "mv c.out test-coverage.out"
-            archiveArtifacts('test-coverage.out, coverage/codeclimate.json, test-coverage.html')
+            archiveArtifacts('report_*.xml, test_*.log, test-coverage.html')
           }
         }
       } }
@@ -180,17 +175,17 @@ pipeline {
       script {
         env.PKG_URL = "${currentBuild.absoluteUrl}/consoleText"
 
-        if (isTestNightlyJob()) {
-          archiveArtifacts('report.xml, test.log')
+        if (!isPRJob()) {
+          archiveArtifacts('report_*.xml, test_*.log, test-coverage.html, test-coverage.out')
         }
         if (params.UNIT_TEST_RERUN_FAILS) {
-          def rerunReports = findFiles(glob: 'report_rerun_fails.txt')
+          def rerunReports = findFiles(glob: 'report_rerun_fails_*.txt')
           if (rerunReports.length > 0) {
-            archiveArtifacts('report_rerun_fails.txt')
+            archiveArtifacts('report_rerun_fails_*.txt')
           }
         }
         junit(
-          testResults: 'report.xml',
+          testResults: 'report_*.xml',
           skipOldReports: true,
           skipPublishingChecks: true,
           skipMarkingBuildUnstable: true
@@ -210,18 +205,24 @@ pipeline {
     failure { 
       script { 
         github.notifyPR(false) 
-        archiveArtifacts('test.log')
+        archiveArtifacts('**/test_*.log')
       }
     }
     cleanup {
-      dir(env.TMPDIR) { deleteDir() }
-      sh "make git-clean"
+      cleanWs()
+      dir("${env.WORKSPACE}@tmp") { deleteDir() }
     }
   } // post
 } // pipeline
 
-def isTestNightlyJob() { env.JOB_BASE_NAME == 'tests-nightly' }
+def isNightlyJob() { env.JOB_BASE_NAME == 'tests-nightly' }
 
-def getDefaultUnitTestCount() { isTestNightlyJob() ? '20' : '1' }
+def isDevelopJob() { env.JOB_BASE_NAME == 'tests-develop' }
 
-def getDefaultTimeout() { isTestNightlyJob() ? 5*60 : 50 }
+def isPRJob() { !isNightlyJob() && !isDevelopJob() }
+
+def getDefaultUnitTestCount() { isNightlyJob() ? '20' : '1' }
+
+def getDefaultTimeout() { isNightlyJob() ? 5*60 : 50 }
+
+def getAmountToKeep() { isNightlyJob() ? '14' : isDevelopJob() ? '30' : '5' }

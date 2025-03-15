@@ -20,7 +20,7 @@ import (
 func TestNewNodeConfigWithDefaults(t *testing.T) {
 	c, err := params.NewNodeConfigWithDefaults(
 		"/some/data/path",
-		params.GoerliNetworkID,
+		params.SepoliaNetworkID,
 		params.WithFleet(params.FleetProd),
 		params.WithLES(),
 		params.WithMailserver(),
@@ -29,10 +29,8 @@ func TestNewNodeConfigWithDefaults(t *testing.T) {
 	assert.Equal(t, "/some/data/path", c.DataDir)
 	assert.Equal(t, "/some/data/path/keystore", c.KeyStoreDir)
 	// assert Whisper
-	assert.Equal(t, true, c.WakuConfig.Enabled)
-	assert.Equal(t, "/some/data/path/waku", c.WakuConfig.DataDir)
-	// assert MailServer
-	assert.Equal(t, false, c.WakuConfig.EnableMailServer)
+	assert.Equal(t, true, c.WakuV2Config.Enabled)
+	assert.Equal(t, "/some/data/path/wakuv2", c.WakuV2Config.DataDir)
 	// assert cluster
 	assert.Equal(t, false, c.NoDiscovery)
 	assert.Equal(t, params.FleetProd, c.ClusterConfig.Fleet)
@@ -87,7 +85,7 @@ func TestNewConfigFromJSON(t *testing.T) {
 func TestConfigWriteRead(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	nodeConfig, err := utils.MakeTestNodeConfigWithDataDir("", tmpDir, params.GoerliNetworkID)
+	nodeConfig, err := utils.MakeTestNodeConfigWithDataDir("", tmpDir, params.SepoliaNetworkID)
 	require.Nil(t, err, "cannot create new config object")
 
 	err = nodeConfig.Save()
@@ -96,7 +94,7 @@ func TestConfigWriteRead(t *testing.T) {
 	loadedConfigData, err := ioutil.ReadFile(filepath.Join(nodeConfig.DataDir, "config.json"))
 	require.Nil(t, err, "cannot read configuration from disk")
 	loadedConfig := string(loadedConfigData)
-	require.Contains(t, loadedConfig, fmt.Sprintf(`"NetworkId": %d`, params.GoerliNetworkID))
+	require.Contains(t, loadedConfig, fmt.Sprintf(`"NetworkId": %d`, params.SepoliaNetworkID))
 	require.Contains(t, loadedConfig, fmt.Sprintf(`"DataDir": "%s"`, tmpDir))
 }
 
@@ -166,21 +164,6 @@ func TestNodeConfigValidate(t *testing.T) {
 			Error: "NodeKey is invalid",
 		},
 		{
-			Name: "Validate that UpstreamConfig.URL is validated if UpstreamConfig is enabled",
-			Config: `{
-				"NetworkId": 1,
-				"DataDir": "/some/dir",
-				"KeyStoreDir": "/some/dir",
-				"KeycardPairingDataFile": "/some/dir/keycard/pairings.json",
-				"NoDiscovery": true,
-				"UpstreamConfig": {
-					"Enabled": true,
-					"URL": "[bad.url]"
-				}
-			}`,
-			Error: "'[bad.url]' is invalid",
-		},
-		{
 			Name: "Validate that UpstreamConfig.URL is not validated if UpstreamConfig is disabled",
 			Config: `{
 				"NetworkId": 1,
@@ -227,10 +210,6 @@ func TestNodeConfigValidate(t *testing.T) {
 				"KeyStoreDir": "/some/dir",
 				"KeycardPairingDataFile": "/some/dir/keycard/pairings.json",
 				"NoDiscovery": true,
-				"WakuConfig": {
-					"Enabled": true,
-					"DataDir": "/foo"
-				},
 				"ShhextConfig": {
 					"PFSEnabled": true
 				}

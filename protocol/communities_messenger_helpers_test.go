@@ -29,8 +29,9 @@ import (
 	"github.com/status-im/status-go/services/wallet/bigint"
 	walletCommon "github.com/status-im/status-go/services/wallet/common"
 	"github.com/status-im/status-go/services/wallet/thirdparty"
-	walletToken "github.com/status-im/status-go/services/wallet/token"
-	"github.com/status-im/status-go/transactions"
+	tokenTypes "github.com/status-im/status-go/services/wallet/token/types"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 type AccountManagerMock struct {
@@ -111,7 +112,7 @@ func (m *TokenManagerMock) GetCachedBalancesByChain(ctx context.Context, account
 	return m.getBalanceBasedOnParams(accounts, tokenAddresses, chainIDs), nil
 }
 
-func (m *TokenManagerMock) FindOrCreateTokenByAddress(ctx context.Context, chainID uint64, address gethcommon.Address) *walletToken.Token {
+func (m *TokenManagerMock) FindOrCreateTokenByAddress(ctx context.Context, chainID uint64, address gethcommon.Address) *tokenTypes.Token {
 	time.Sleep(100 * time.Millisecond) // simulate response time
 	return nil
 }
@@ -199,10 +200,6 @@ func (c *CollectiblesServiceMock) SetSignerPubkeyForCommunity(communityID []byte
 		c.Signers = make(map[string]string)
 	}
 	c.Signers[types.EncodeHex(communityID)] = signerPubKey
-}
-
-func (c *CollectiblesServiceMock) SetSignerPubKey(ctx context.Context, chainID uint64, contractAddress string, txArgs transactions.SendTxArgs, password string, newSignerPubKey string) (string, error) {
-	return "", nil
 }
 
 func (c *CollectiblesServiceMock) GetCollectibleContractData(chainID uint64, contractAddress string) (*communities.CollectibleContractData, error) {
@@ -323,13 +320,13 @@ func defaultTestCommunitiesMessengerSettings() *settings.Settings {
 		SendPushNotifications:     true,
 		ProfilePicturesVisibility: 1,
 		DefaultSyncPeriod:         777600,
-		UseMailservers:            true,
+		UseMailservers:            false,
 		LinkPreviewRequestEnabled: true,
 		SendStatusUpdates:         true,
 		WalletRootAddress:         types.HexToAddress("0x1122334455667788990011223344556677889900")}
 }
 
-func newTestCommunitiesMessenger(s *suite.Suite, waku types.Waku, config testCommunitiesMessengerConfig) *Messenger {
+func newTestCommunitiesMessenger(s *suite.Suite, waku wakutypes.Waku, config testCommunitiesMessengerConfig) *Messenger {
 	err := config.complete()
 	s.Require().NoError(err)
 

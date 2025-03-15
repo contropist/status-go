@@ -11,17 +11,15 @@ import (
 
 	"github.com/status-im/status-go/protocol/storenodes"
 
-	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
-	"github.com/status-im/status-go/protocol/common/shard"
 	"github.com/status-im/status-go/protocol/communities"
 	"github.com/status-im/status-go/protocol/tt"
+	"github.com/status-im/status-go/wakuv2"
 
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/zap"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/status-im/status-go/appdatabase"
-	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/protocol/protobuf"
 	"github.com/status-im/status-go/protocol/requests"
 	"github.com/status-im/status-go/protocol/sqlite"
@@ -30,6 +28,8 @@ import (
 	mailserversDB "github.com/status-im/status-go/services/mailservers"
 	waku2 "github.com/status-im/status-go/wakuv2"
 	wakuV2common "github.com/status-im/status-go/wakuv2/common"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 func TestMessengerStoreNodeCommunitySuite(t *testing.T) {
@@ -43,10 +43,10 @@ type MessengerStoreNodeCommunitySuite struct {
 	cancel chan struct{}
 
 	owner     *Messenger
-	ownerWaku types.Waku
+	ownerWaku wakutypes.Waku
 
 	bob     *Messenger
-	bobWaku types.Waku
+	bobWaku wakutypes.Waku
 
 	storeNode                 *waku2.Waku
 	storeNodeAddress          multiaddr.Multiaddr
@@ -92,16 +92,17 @@ func (s *MessengerStoreNodeCommunitySuite) createStore(name string) (*waku2.Waku
 	cfg := testWakuV2Config{
 		logger:      s.logger.Named(name),
 		enableStore: true,
-		clusterID:   shard.MainStatusShardCluster,
+		clusterID:   wakuv2.MainStatusShardCluster,
 	}
 
 	storeNode := NewTestWakuV2(&s.Suite, cfg)
-	addresses := storeNode.ListenAddresses()
+	addresses, err := storeNode.ListenAddresses()
+	s.Require().NoError(err)
 	s.Require().GreaterOrEqual(len(addresses), 1, "no storenode listen address")
 	return storeNode, addresses[0]
 }
 
-func (s *MessengerStoreNodeCommunitySuite) newMessenger(name string, storenodeAddress *multiaddr.Multiaddr) (*Messenger, types.Waku) {
+func (s *MessengerStoreNodeCommunitySuite) newMessenger(name string, storenodeAddress *multiaddr.Multiaddr) (*Messenger, wakutypes.Waku) {
 	localMailserverID := "local-mailserver-007"
 	localFleet := "local-fleet-007"
 
@@ -109,10 +110,9 @@ func (s *MessengerStoreNodeCommunitySuite) newMessenger(name string, storenodeAd
 	cfg := testWakuV2Config{
 		logger:      logger,
 		enableStore: false,
-		clusterID:   shard.MainStatusShardCluster,
+		clusterID:   wakuv2.MainStatusShardCluster,
 	}
 	wakuV2 := NewTestWakuV2(&s.Suite, cfg)
-	wakuV2Wrapper := gethbridge.NewGethWakuV2Wrapper(wakuV2)
 
 	privateKey, err := crypto.GenerateKey()
 	s.Require().NoError(err)
@@ -122,16 +122,12 @@ func (s *MessengerStoreNodeCommunitySuite) newMessenger(name string, storenodeAd
 	err = sqlite.Migrate(mailserversSQLDb) // migrate default
 	s.Require().NoError(err)
 
-	var sAddr string
-	if storenodeAddress != nil {
-		sAddr = (*storenodeAddress).String()
-	}
 	mailserversDatabase := mailserversDB.NewDB(mailserversSQLDb)
 	err = mailserversDatabase.Add(mailserversDB.Mailserver{
-		ID:      localMailserverID,
-		Name:    localMailserverID,
-		Address: sAddr,
-		Fleet:   localFleet,
+		ID:    localMailserverID,
+		Name:  localMailserverID,
+		Addr:  storenodeAddress,
+		Fleet: localFleet,
 	})
 	s.Require().NoError(err)
 
@@ -146,14 +142,14 @@ func (s *MessengerStoreNodeCommunitySuite) newMessenger(name string, storenodeAd
 		)
 	}
 
-	messenger, err := newMessengerWithKey(wakuV2Wrapper, privateKey, logger, options)
+	messenger, err := newMessengerWithKey(wakuV2, privateKey, logger, options)
 
 	s.Require().NoError(err)
-	return messenger, wakuV2Wrapper
+	return messenger, wakuV2
 }
 
 func (s *MessengerStoreNodeCommunitySuite) createCommunityWithChat(m *Messenger) (*communities.Community, *Chat) {
-	WaitForAvailableStoreNode(&s.Suite, m, 500*time.Millisecond)
+	WaitForAvailableStoreNode(&s.Suite, m, context.TODO())
 
 	storeNodeSubscription := s.setupStoreNodeEnvelopesWatcher(nil)
 
@@ -201,7 +197,7 @@ func (s *MessengerStoreNodeCommunitySuite) fetchCommunity(m *Messenger, communit
 		WithWaitForResponseOption(true),
 	}
 
-	fetchedCommunity, stats, err := m.storeNodeRequestsManager.FetchCommunity(communityShard, options)
+	fetchedCommunity, stats, err := m.storeNodeRequestsManager.FetchCommunity(context.TODO(), communityShard, options)
 
 	s.Require().NoError(err)
 	s.requireCommunitiesEqual(fetchedCommunity, expectedCommunity)
@@ -209,8 +205,8 @@ func (s *MessengerStoreNodeCommunitySuite) fetchCommunity(m *Messenger, communit
 	return stats
 }
 
-func (s *MessengerStoreNodeCommunitySuite) setupEnvelopesWatcher(wakuNode *waku2.Waku, topic *wakuV2common.TopicType, cb func(envelope *wakuV2common.ReceivedMessage)) {
-	envelopesWatcher := make(chan wakuV2common.EnvelopeEvent, 100)
+func (s *MessengerStoreNodeCommunitySuite) setupEnvelopesWatcher(wakuNode wakutypes.Waku, topic *wakutypes.TopicType, cb func(envelope *wakuV2common.ReceivedMessage)) {
+	envelopesWatcher := make(chan wakutypes.EnvelopeEvent, 100)
 	envelopesSub := wakuNode.SubscribeEnvelopeEvents(envelopesWatcher)
 
 	go func() {
@@ -221,13 +217,13 @@ func (s *MessengerStoreNodeCommunitySuite) setupEnvelopesWatcher(wakuNode *waku2
 				return
 
 			case envelopeEvent := <-envelopesWatcher:
-				if envelopeEvent.Event != wakuV2common.EventEnvelopeAvailable {
+				if envelopeEvent.Event != wakutypes.EventEnvelopeAvailable {
 					continue
 				}
 				if topic != nil && *topic != envelopeEvent.Topic {
 					continue
 				}
-				envelope := wakuNode.GetEnvelope(envelopeEvent.Hash)
+				envelope := wakuNode.(*waku2.Waku).GetEnvelope(envelopeEvent.Hash)
 				cb(envelope)
 				s.logger.Debug("envelope available event for fetched content topic",
 					zap.Any("envelopeEvent", envelopeEvent),
@@ -239,7 +235,7 @@ func (s *MessengerStoreNodeCommunitySuite) setupEnvelopesWatcher(wakuNode *waku2
 	}()
 }
 
-func (s *MessengerStoreNodeCommunitySuite) setupStoreNodeEnvelopesWatcher(topic *wakuV2common.TopicType) <-chan string {
+func (s *MessengerStoreNodeCommunitySuite) setupStoreNodeEnvelopesWatcher(topic *wakutypes.TopicType) <-chan string {
 	storeNodeSubscription := make(chan string, 100)
 	s.setupEnvelopesWatcher(s.storeNode, topic, func(envelope *wakuV2common.ReceivedMessage) {
 		storeNodeSubscription <- envelope.Hash().String()
@@ -298,8 +294,8 @@ func (s *MessengerStoreNodeCommunitySuite) TestSetStorenodeForCommunity_fetchMes
 	err = s.bob.DialPeer(s.storeNodeAddress)
 	s.Require().NoError(err)
 
-	ownerPeerID := gethbridge.GetGethWakuV2From(s.ownerWaku).PeerID()
-	bobPeerID := gethbridge.GetGethWakuV2From(s.bobWaku).PeerID()
+	ownerPeerID := s.ownerWaku.PeerID()
+	bobPeerID := s.bobWaku.PeerID()
 
 	// 1. Owner creates a community
 	community, chat := s.createCommunityWithChat(s.owner)
@@ -355,10 +351,10 @@ func (s *MessengerStoreNodeCommunitySuite) TestToggleUseMailservers() {
 	// Enable use of mailservers
 	err := s.owner.ToggleUseMailservers(true)
 	s.Require().NoError(err)
-	s.Require().NotNil(s.owner.mailserverCycle.activeMailserver)
+	s.Require().NotNil(s.owner.transport.GetActiveStorenode())
 
 	// Disable use of mailservers
 	err = s.owner.ToggleUseMailservers(false)
 	s.Require().NoError(err)
-	s.Require().Nil(s.owner.mailserverCycle.activeMailserver)
+	s.Require().Nil(s.owner.transport.GetActiveStorenode())
 }

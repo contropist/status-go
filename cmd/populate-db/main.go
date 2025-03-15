@@ -20,6 +20,7 @@ import (
 
 	"github.com/status-im/status-go/account/generator"
 	"github.com/status-im/status-go/api"
+	"github.com/status-im/status-go/cmd/utils"
 	"github.com/status-im/status-go/common/dbsetup"
 	"github.com/status-im/status-go/eth-node/crypto"
 	"github.com/status-im/status-go/eth-node/types"
@@ -33,7 +34,7 @@ import (
 	"github.com/status-im/status-go/protocol/identity/alias"
 	"github.com/status-im/status-go/protocol/protobuf"
 	"github.com/status-im/status-go/protocol/requests"
-	wakuextn "github.com/status-im/status-go/services/wakuext"
+	wakuextn "github.com/status-im/status-go/services/wakuv2ext"
 )
 
 type testTimeSource struct{}
@@ -64,10 +65,10 @@ var (
 	dataDir   = flag.String("dir", getDefaultDataDir(), "Directory used by node to store data")
 	networkID = flag.Int(
 		"network-id",
-		params.GoerliNetworkID,
+		params.SepoliaNetworkID,
 		fmt.Sprintf(
-			"A network ID: %d (Mainnet), %d (Goerli)",
-			params.MainNetworkID, params.GoerliNetworkID,
+			"A network ID: %d (Mainnet), %d (Sepolia)",
+			params.MainNetworkID, params.SepoliaNetworkID,
 		),
 	)
 	listenAddr = flag.String("addr", "", "address to bind listener to")
@@ -82,8 +83,11 @@ func init() {
 
 // nolint:gocyclo
 func main() {
-	colors := terminal.IsTerminal(int(os.Stdin.Fd()))
-	if err := logutils.OverrideRootLog(true, "ERROR", logutils.FileOptions{}, colors); err != nil {
+	if err := logutils.OverrideRootLoggerWithConfig(logutils.LogSettings{
+		Enabled:   true,
+		Level:     "ERROR",
+		Colorized: terminal.IsTerminal(int(os.Stdin.Fd())),
+	}); err != nil {
 		stdlog.Fatalf("Error initializing logger: %v", err)
 	}
 
@@ -122,7 +126,7 @@ func main() {
 	}
 
 	// set up logging options
-	setupLogging(config)
+	utils.SetupLogging(logLevel, logWithoutColors, config)
 
 	// We want statusd to be distinct from StatusIM client.
 	config.Name = serverClientName
@@ -132,14 +136,14 @@ func main() {
 		return
 	}
 
-	backend := api.NewGethStatusBackend()
+	backend := api.NewGethStatusBackend(logutils.ZapLogger())
 	err = ImportAccount(*seedPhrase, backend)
 	if err != nil {
 		logger.Error("failed import account", "err", err)
 		return
 	}
 
-	wakuextservice := backend.StatusNode().WakuExtService()
+	wakuextservice := backend.StatusNode().WakuV2ExtService()
 	if wakuextservice == nil {
 		logger.Error("wakuext not available")
 		return
@@ -272,26 +276,6 @@ func getDefaultDataDir() string {
 	return "./statusd-data"
 }
 
-func setupLogging(config *params.NodeConfig) {
-	if *logLevel != "" {
-		config.LogLevel = *logLevel
-	}
-
-	logSettings := logutils.LogSettings{
-		Enabled:         config.LogEnabled,
-		MobileSystem:    config.LogMobileSystem,
-		Level:           config.LogLevel,
-		File:            config.LogFile,
-		MaxSize:         config.LogMaxSize,
-		MaxBackups:      config.LogMaxBackups,
-		CompressRotated: config.LogCompressRotated,
-	}
-	colors := !(*logWithoutColors) && terminal.IsTerminal(int(os.Stdin.Fd()))
-	if err := logutils.OverrideRootLogWithConfig(logSettings, colors); err != nil {
-		stdlog.Fatalf("Error initializing logger: %v", err)
-	}
-}
-
 // printVersion prints verbose output about version and config.
 func printVersion(config *params.NodeConfig) {
 	fmt.Println(strings.Title(config.Name))
@@ -393,10 +377,6 @@ func defaultNodeConfig(installationID string) (*params.NodeConfig, error) {
 	nodeConfig.NetworkID = 1
 	nodeConfig.LogLevel = "ERROR"
 	nodeConfig.DataDir = api.DefaultDataDir
-	nodeConfig.UpstreamConfig = params.UpstreamRPCConfig{
-		Enabled: true,
-		URL:     "https://mainnet.infura.io/v3/800c641949d64d768a5070a1b0511938",
-	}
 
 	nodeConfig.Name = "StatusIM"
 	clusterConfig, err := params.LoadClusterConfigFromFleet("eth.prod")
@@ -410,10 +390,9 @@ func defaultNodeConfig(installationID string) (*params.NodeConfig, error) {
 	nodeConfig.BrowsersConfig = params.BrowsersConfig{Enabled: true}
 	nodeConfig.PermissionsConfig = params.PermissionsConfig{Enabled: true}
 	nodeConfig.MailserversConfig = params.MailserversConfig{Enabled: true}
-	nodeConfig.WakuConfig = params.WakuConfig{
+	nodeConfig.WakuV2Config = params.WakuV2Config{
 		Enabled:     true,
 		LightClient: true,
-		MinimumPoW:  0.000001,
 	}
 
 	nodeConfig.ShhextConfig = params.ShhextConfig{

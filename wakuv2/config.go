@@ -23,8 +23,6 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/status-im/status-go/protocol/common/shard"
-
 	ethdisc "github.com/ethereum/go-ethereum/p2p/dnsdisc"
 
 	"github.com/status-im/status-go/wakuv2/common"
@@ -58,6 +56,7 @@ type Config struct {
 	StoreSeconds                           int              `toml:",omitempty"`
 	TelemetryServerURL                     string           `toml:",omitempty"`
 	TelemetrySendPeriodMs                  int              `toml:",omitempty"` // Number of milliseconds to wait between sending requests to telemetry service
+	TelemetryPeerCountSendPeriod           int              `toml:",omitempty"` // Number of milliseconds to wait between checking peer count
 	DefaultShardPubsubTopic                string           `toml:",omitempty"` // Pubsub topic to be used by default for messages that do not have a topic assigned (depending whether sharding is used or not)
 	DefaultShardedPubsubTopics             []string         `toml:", omitempty"`
 	ClusterID                              uint16           `toml:",omitempty"`
@@ -116,10 +115,10 @@ func setDefaults(cfg *Config) *Config {
 	}
 
 	if cfg.DefaultShardPubsubTopic == "" {
-		cfg.DefaultShardPubsubTopic = shard.DefaultShardPubsubTopic()
+		cfg.DefaultShardPubsubTopic = DefaultShardPubsubTopic()
 		//For now populating with both used shards, but this can be populated from user subscribed communities etc once community sharding is implemented
-		cfg.DefaultShardedPubsubTopics = append(cfg.DefaultShardedPubsubTopics, shard.DefaultShardPubsubTopic())
-		cfg.DefaultShardedPubsubTopics = append(cfg.DefaultShardedPubsubTopics, shard.DefaultNonProtectedPubsubTopic())
+		cfg.DefaultShardedPubsubTopics = append(cfg.DefaultShardedPubsubTopics, DefaultShardPubsubTopic())
+		cfg.DefaultShardedPubsubTopics = append(cfg.DefaultShardedPubsubTopics, DefaultNonProtectedPubsubTopic())
 	}
 
 	return cfg

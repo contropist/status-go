@@ -18,10 +18,10 @@ func WithTestStoreNode(s *suite.Suite, id string, address multiaddr.Multiaddr, f
 
 		db := mailservers.NewDB(sqldb)
 		err = db.Add(mailservers.Mailserver{
-			ID:      id,
-			Name:    id,
-			Address: address.String(),
-			Fleet:   fleet,
+			ID:    id,
+			Name:  id,
+			Addr:  &address,
+			Fleet: fleet,
 		})
 		s.Require().NoError(err)
 
@@ -50,6 +50,15 @@ func WithCuratedCommunitiesUpdateLoop(enabled bool) Option {
 func WithCommunityManagerOptions(options []communities.ManagerOption) Option {
 	return func(c *config) error {
 		c.communityManagerOptions = options
+		return nil
+	}
+}
+
+func WithStubOnlineChecker() Option {
+	return func(c *config) error {
+		c.onlineChecker = func() bool {
+			return true
+		}
 		return nil
 	}
 }

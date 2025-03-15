@@ -16,11 +16,13 @@ import (
 	"github.com/status-im/status-go/eth-node/crypto"
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/protocol/common"
-	"github.com/status-im/status-go/protocol/common/shard"
 	"github.com/status-im/status-go/protocol/communities/token"
 	"github.com/status-im/status-go/protocol/encryption"
 	"github.com/status-im/status-go/protocol/protobuf"
 	"github.com/status-im/status-go/services/wallet/bigint"
+	"github.com/status-im/status-go/wakuv2"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 type Persistence struct {
@@ -883,7 +885,7 @@ func (p *Persistence) SetPrivateKey(id []byte, privKey *ecdsa.PrivateKey) error 
 	return err
 }
 
-func (p *Persistence) SaveWakuMessages(messages []*types.Message) (err error) {
+func (p *Persistence) SaveWakuMessages(messages []*wakutypes.Message) (err error) {
 	tx, err := p.db.BeginTx(context.Background(), &sql.TxOptions{})
 	if err != nil {
 		return
@@ -919,7 +921,7 @@ func (p *Persistence) SaveWakuMessages(messages []*types.Message) (err error) {
 	return
 }
 
-func (p *Persistence) SaveWakuMessage(message *types.Message) error {
+func (p *Persistence) SaveWakuMessage(message *wakutypes.Message) error {
 	_, err := p.db.Exec(`INSERT OR REPLACE INTO waku_messages (sig, timestamp, topic, payload, padding, hash, third_party_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		message.Sig,
 		message.Timestamp,
@@ -932,7 +934,7 @@ func (p *Persistence) SaveWakuMessage(message *types.Message) error {
 	return err
 }
 
-func wakuMessageTimestampQuery(topics []types.TopicType) string {
+func wakuMessageTimestampQuery(topics []wakutypes.TopicType) string {
 	query := " FROM waku_messages WHERE "
 	for i, topic := range topics {
 		query += `topic = "` + topic.String() + `"`
@@ -943,7 +945,7 @@ func wakuMessageTimestampQuery(topics []types.TopicType) string {
 	return query
 }
 
-func (p *Persistence) GetOldestWakuMessageTimestamp(topics []types.TopicType) (uint64, error) {
+func (p *Persistence) GetOldestWakuMessageTimestamp(topics []wakutypes.TopicType) (uint64, error) {
 	var timestamp sql.NullInt64
 	query := "SELECT MIN(timestamp)"
 	query += wakuMessageTimestampQuery(topics)
@@ -951,7 +953,7 @@ func (p *Persistence) GetOldestWakuMessageTimestamp(topics []types.TopicType) (u
 	return uint64(timestamp.Int64), err
 }
 
-func (p *Persistence) GetLatestWakuMessageTimestamp(topics []types.TopicType) (uint64, error) {
+func (p *Persistence) GetLatestWakuMessageTimestamp(topics []wakutypes.TopicType) (uint64, error) {
 	var timestamp sql.NullInt64
 	query := "SELECT MAX(timestamp)"
 	query += wakuMessageTimestampQuery(topics)
@@ -959,7 +961,7 @@ func (p *Persistence) GetLatestWakuMessageTimestamp(topics []types.TopicType) (u
 	return uint64(timestamp.Int64), err
 }
 
-func (p *Persistence) GetWakuMessagesByFilterTopic(topics []types.TopicType, from uint64, to uint64) ([]types.Message, error) {
+func (p *Persistence) GetWakuMessagesByFilterTopic(topics []wakutypes.TopicType, from uint64, to uint64) ([]wakutypes.Message, error) {
 
 	query := "SELECT sig, timestamp, topic, payload, padding, hash, third_party_id FROM waku_messages WHERE timestamp >= " + fmt.Sprint(from) + " AND timestamp < " + fmt.Sprint(to) + " AND (" //nolint: gosec
 
@@ -976,17 +978,17 @@ func (p *Persistence) GetWakuMessagesByFilterTopic(topics []types.TopicType, fro
 		return nil, err
 	}
 	defer rows.Close()
-	messages := []types.Message{}
+	messages := []wakutypes.Message{}
 
 	for rows.Next() {
-		msg := types.Message{}
+		msg := wakutypes.Message{}
 		var topicStr string
 		var hashStr string
 		err := rows.Scan(&msg.Sig, &msg.Timestamp, &topicStr, &msg.Payload, &msg.Padding, &hashStr, &msg.ThirdPartyID)
 		if err != nil {
 			return nil, err
 		}
-		msg.Topic = types.StringToTopic(topicStr)
+		msg.Topic = wakutypes.StringToTopic(topicStr)
 		msg.Hash = types.Hex2Bytes(hashStr)
 		messages = append(messages, msg)
 	}
@@ -1766,7 +1768,7 @@ func (p *Persistence) AllNonApprovedCommunitiesRequestsToJoin() ([]*RequestToJoi
 	return nonApprovedRequestsToJoin, nil
 }
 
-func (p *Persistence) SaveCommunityShard(communityID types.HexBytes, shard *shard.Shard, clock uint64) error {
+func (p *Persistence) SaveCommunityShard(communityID types.HexBytes, shard *wakuv2.Shard, clock uint64) error {
 	var cluster, index *uint16
 
 	if shard != nil {
@@ -1801,7 +1803,7 @@ func (p *Persistence) SaveCommunityShard(communityID types.HexBytes, shard *shar
 }
 
 // if data will not be found, will return sql.ErrNoRows. Must be handled on the caller side
-func (p *Persistence) GetCommunityShard(communityID types.HexBytes) (*shard.Shard, error) {
+func (p *Persistence) GetCommunityShard(communityID types.HexBytes) (*wakuv2.Shard, error) {
 	var cluster sql.NullInt64
 	var index sql.NullInt64
 	err := p.db.QueryRow(`SELECT shard_cluster, shard_index FROM communities_shards WHERE community_id = ?`,
@@ -1815,7 +1817,7 @@ func (p *Persistence) GetCommunityShard(communityID types.HexBytes) (*shard.Shar
 		return nil, nil
 	}
 
-	return &shard.Shard{
+	return &wakuv2.Shard{
 		Cluster: uint16(cluster.Int64),
 		Index:   uint16(index.Int64),
 	}, nil
@@ -2098,6 +2100,7 @@ func (p *Persistence) GetCommunityRequestsToJoinRevealedAddresses(communityID []
 func (p *Persistence) GetEncryptionKeyRequests(communityID []byte, channelIDs map[string]struct{}) (map[string]*EncryptionKeysRequestRecord, error) {
 	result := map[string]*EncryptionKeysRequestRecord{}
 
+	//nolint:gosec
 	query := "SELECT channel_id, requested_at, requested_count FROM community_encryption_keys_requests WHERE community_id = ? AND channel_id IN (?" + strings.Repeat(",?", len(channelIDs)-1) + ")"
 
 	args := make([]interface{}, 0, len(channelIDs)+1)
@@ -2158,6 +2161,7 @@ func (p *Persistence) UpdateAndPruneEncryptionKeyRequests(communityID types.HexB
 	}
 
 	// Delete entries that do not match the channelIDs list
+	//nolint:gosec
 	deleteQuery := "DELETE FROM community_encryption_keys_requests WHERE community_id = ? AND channel_id NOT IN (?" + strings.Repeat(",?", len(channelIDs)-1) + ")"
 	args := make([]interface{}, 0, len(channelIDs)+1)
 	args = append(args, communityID)

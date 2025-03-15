@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/zap"
 
-	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
 	"github.com/status-im/status-go/eth-node/crypto"
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/protocol/common"
@@ -20,7 +19,8 @@ import (
 	"github.com/status-im/status-go/protocol/pushnotificationserver"
 	"github.com/status-im/status-go/protocol/requests"
 	"github.com/status-im/status-go/protocol/tt"
-	"github.com/status-im/status-go/waku"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 const (
@@ -39,18 +39,17 @@ type MessengerPushNotificationSuite struct {
 	privateKey *ecdsa.PrivateKey // private key for the main instance of Messenger
 	// If one wants to send messages between different instances of Messenger,
 	// a single Waku service should be shared.
-	shh    types.Waku
+	shh    wakutypes.Waku
 	logger *zap.Logger
 }
 
 func (s *MessengerPushNotificationSuite) SetupTest() {
 	s.logger = tt.MustCreateTestLogger()
 
-	config := waku.DefaultConfig
-	config.MinimumAcceptedPoW = 0
-	shh := waku.New(&config, s.logger)
-	s.shh = gethbridge.NewGethWakuWrapper(shh)
+	shh, err := newTestWakuNode(s.logger)
+	s.Require().NoError(err)
 	s.Require().NoError(shh.Start())
+	s.shh = shh
 
 	s.m = s.newMessenger(s.shh)
 	s.privateKey = s.m.identity
@@ -61,7 +60,7 @@ func (s *MessengerPushNotificationSuite) TearDownTest() {
 	_ = s.logger.Sync()
 }
 
-func (s *MessengerPushNotificationSuite) newMessenger(shh types.Waku) *Messenger {
+func (s *MessengerPushNotificationSuite) newMessenger(shh wakutypes.Waku) *Messenger {
 	privateKey, err := crypto.GenerateKey()
 	s.Require().NoError(err)
 
@@ -70,7 +69,7 @@ func (s *MessengerPushNotificationSuite) newMessenger(shh types.Waku) *Messenger
 	return messenger
 }
 
-func (s *MessengerPushNotificationSuite) newPushNotificationServer(shh types.Waku, privateKey *ecdsa.PrivateKey) *Messenger {
+func (s *MessengerPushNotificationSuite) newPushNotificationServer(shh wakutypes.Waku, privateKey *ecdsa.PrivateKey) *Messenger {
 
 	serverConfig := &pushnotificationserver.Config{
 		Enabled:  true,

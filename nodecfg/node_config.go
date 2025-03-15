@@ -3,6 +3,7 @@ package nodecfg
 import (
 	"context"
 	"database/sql"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/p2p/discv5"
@@ -31,21 +32,17 @@ func nodeConfigWasMigrated(tx *sql.Tx) (migrated bool, err error) {
 
 type insertFn func(tx *sql.Tx, c *params.NodeConfig) error
 
-func insertNodeConfig(tx *sql.Tx, c *params.NodeConfig) error {
-	_, err := tx.Exec(`
+func insertNodeConfigBase(tx *sql.Tx, c *params.NodeConfig, includeConnector bool) error {
+	query := `
 	INSERT OR REPLACE INTO node_config (
-		network_id, data_dir, keystore_dir, node_key, no_discovery, 
+		network_id, data_dir, keystore_dir, node_key, no_discovery,
 		listen_addr, advertise_addr, name, version, api_modules, tls_enabled,
 		max_peers, max_pending_peers, enable_status_service, enable_ntp_sync,
 		bridge_enabled, wallet_enabled, local_notifications_enabled,
-		browser_enabled, permissions_enabled, mailservers_enabled,
-		swarm_enabled, mailserver_registry_address, web3provider_enabled, connector_enabled,
-		synthetic_id
-	) VALUES (
-		?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		?, ?, ?, ?, ?, 'id'
-	)`,
+		 browser_enabled, permissions_enabled, mailservers_enabled,
+		 swarm_enabled, mailserver_registry_address, web3provider_enabled`
+
+	args := []any{
 		c.NetworkID, c.DataDir, c.KeyStoreDir, c.NodeKey, c.NoDiscovery,
 		c.ListenAddr, c.AdvertiseAddr, c.Name, c.Version, c.APIModules,
 		c.TLSEnabled, c.MaxPeers, c.MaxPendingPeers,
@@ -53,9 +50,26 @@ func insertNodeConfig(tx *sql.Tx, c *params.NodeConfig) error {
 		c.BridgeConfig.Enabled, c.WalletConfig.Enabled, c.LocalNotificationsConfig.Enabled,
 		c.BrowsersConfig.Enabled, c.PermissionsConfig.Enabled, c.MailserversConfig.Enabled,
 		c.SwarmConfig.Enabled, c.MailServerRegistryAddress, c.Web3ProviderConfig.Enabled,
-		c.ConnectorConfig.Enabled,
-	)
+	}
+
+	if includeConnector {
+		query += `, connector_enabled`
+		args = append(args, c.ConnectorConfig.Enabled)
+	}
+
+	query += `, synthetic_id) VALUES (?` + strings.Repeat(",?", len(args)) + `)`
+	args = append(args, "id")
+
+	_, err := tx.Exec(query, args...)
 	return err
+}
+
+func insertNodeConfig(tx *sql.Tx, c *params.NodeConfig) error {
+	return insertNodeConfigBase(tx, c, false)
+}
+
+func insertNodeConfigWithConnector(tx *sql.Tx, c *params.NodeConfig) error {
+	return insertNodeConfigBase(tx, c, true)
 }
 
 func insertHTTPConfig(tx *sql.Tx, c *params.NodeConfig) error {
@@ -86,17 +100,35 @@ func insertHTTPConfig(tx *sql.Tx, c *params.NodeConfig) error {
 	return nil
 }
 
-func insertLogConfig(tx *sql.Tx, c *params.NodeConfig) error {
-	_, err := tx.Exec(`
+func insertLogConfigBase(tx *sql.Tx, c *params.NodeConfig, includeNamespaces bool) error {
+	query := `
 	INSERT OR REPLACE INTO log_config (
-		enabled, mobile_system, log_dir, log_level, max_backups, max_size,
-		file, compress_rotated, log_to_stderr, synthetic_id
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'id'	)`,
-		c.LogEnabled, c.LogMobileSystem, c.LogDir, c.LogLevel, c.LogMaxBackups, c.LogMaxSize,
-		c.LogFile, c.LogCompressRotated, c.LogToStderr,
-	)
+		enabled, log_dir, log_level, max_backups, max_size,
+		file, compress_rotated, log_to_stderr`
 
+	args := []any{
+		c.LogEnabled, c.LogDir, c.LogLevel, c.LogMaxBackups, c.LogMaxSize,
+		c.LogFile, c.LogCompressRotated, c.LogToStderr,
+	}
+
+	if includeNamespaces {
+		query += `, log_namespaces`
+		args = append(args, c.LogNamespaces)
+	}
+
+	query += `, synthetic_id) VALUES (?` + strings.Repeat(",?", len(args)) + `)`
+	args = append(args, "id")
+
+	_, err := tx.Exec(query, args...)
 	return err
+}
+
+func insertLogConfigWithNamespaces(tx *sql.Tx, c *params.NodeConfig) error {
+	return insertLogConfigBase(tx, c, true)
+}
+
+func insertLogConfig(tx *sql.Tx, c *params.NodeConfig) error {
+	return insertLogConfigBase(tx, c, false)
 }
 
 func insertLightETHConfigTrustedNodes(tx *sql.Tx, c *params.NodeConfig) error {
@@ -148,11 +180,6 @@ func insertIPCConfig(tx *sql.Tx, c *params.NodeConfig) error {
 
 func insertClusterConfig(tx *sql.Tx, c *params.NodeConfig) error {
 	_, err := tx.Exec(`INSERT OR REPLACE INTO cluster_config (enabled, fleet, synthetic_id) VALUES (?, ?, 'id')`, c.ClusterConfig.Enabled, c.ClusterConfig.Fleet)
-	return err
-}
-
-func insertUpstreamConfig(tx *sql.Tx, c *params.NodeConfig) error {
-	_, err := tx.Exec(`INSERT OR REPLACE INTO upstream_config (enabled, url, synthetic_id) VALUES (?, ?, 'id')`, c.UpstreamConfig.Enabled, c.UpstreamConfig.URL)
 	return err
 }
 
@@ -261,39 +288,6 @@ func insertWakuV2ConfigPostMigration(tx *sql.Tx, c *params.NodeConfig) error {
 	return err
 }
 
-func insertWakuV1Config(tx *sql.Tx, c *params.NodeConfig) error {
-	_, err := tx.Exec(`
-	INSERT OR REPLACE INTO waku_config (
-		enabled, light_client, full_node, enable_mailserver, data_dir, minimum_pow, mailserver_password, mailserver_rate_limit, mailserver_data_retention,
-		ttl, max_message_size, enable_rate_limiter, packet_rate_limit_ip, packet_rate_limit_peer_id, bytes_rate_limit_ip, bytes_rate_limit_peer_id,
-		rate_limit_tolerance, bloom_filter_mode, enable_confirmations, synthetic_id
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'id')`,
-		c.WakuConfig.Enabled, c.WakuConfig.LightClient, c.WakuConfig.FullNode, c.WakuConfig.EnableMailServer, c.WakuConfig.DataDir, c.WakuConfig.MinimumPoW,
-		c.WakuConfig.MailServerPassword, c.WakuConfig.MailServerRateLimit, c.WakuConfig.MailServerDataRetention, c.WakuConfig.TTL, c.WakuConfig.MaxMessageSize,
-		c.WakuConfig.EnableRateLimiter, c.WakuConfig.PacketRateLimitIP, c.WakuConfig.PacketRateLimitPeerID, c.WakuConfig.BytesRateLimitIP, c.WakuConfig.BytesRateLimitPeerID,
-		c.WakuConfig.RateLimitTolerance, c.WakuConfig.BloomFilterMode, c.WakuConfig.EnableConfirmations,
-	)
-	if err != nil {
-		return err
-	}
-
-	if _, err := tx.Exec(`INSERT OR REPLACE INTO waku_config_db_pg (enabled, uri, synthetic_id) VALUES (?, ?, 'id')`, c.WakuConfig.DatabaseConfig.PGConfig.Enabled, c.WakuConfig.DatabaseConfig.PGConfig.URI); err != nil {
-		return err
-	}
-
-	if _, err := tx.Exec(`DELETE FROM waku_softblacklisted_peers WHERE synthetic_id = 'id'`); err != nil {
-		return err
-	}
-
-	for _, peerID := range c.WakuConfig.SoftBlacklistedPeerIDs {
-		_, err := tx.Exec(`INSERT OR REPLACE INTO waku_softblacklisted_peers (peer_id, synthetic_id) VALUES (?, 'id')`, peerID)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func insertPushNotificationsServerConfig(tx *sql.Tx, c *params.NodeConfig) error {
 	hexPrivKey := ""
 	if c.PushNotificationServerConfig.Identity != nil {
@@ -336,7 +330,6 @@ func nodeConfigUpgradeInserts() []insertFn {
 		insertHTTPConfig,
 		insertIPCConfig,
 		insertLogConfig,
-		insertUpstreamConfig,
 		insertClusterConfig,
 		insertClusterConfigNodes,
 		insertLightETHConfig,
@@ -345,7 +338,6 @@ func nodeConfigUpgradeInserts() []insertFn {
 		insertRequireTopics,
 		insertPushNotificationsServerConfig,
 		insertShhExtConfig,
-		insertWakuV1Config,
 		insertWakuV2ConfigPreMigration,
 	}
 }
@@ -356,11 +348,10 @@ func nodeConfigNormalInserts() []insertFn {
 	// the selects being used there are not affected.
 
 	return []insertFn{
-		insertNodeConfig,
+		insertNodeConfigWithConnector,
 		insertHTTPConfig,
 		insertIPCConfig,
-		insertLogConfig,
-		insertUpstreamConfig,
+		insertLogConfigWithNamespaces,
 		insertClusterConfig,
 		insertClusterConfigNodes,
 		insertLightETHConfig,
@@ -369,7 +360,6 @@ func nodeConfigNormalInserts() []insertFn {
 		insertRequireTopics,
 		insertPushNotificationsServerConfig,
 		insertShhExtConfig,
-		insertWakuV1Config,
 		insertWakuV2ConfigPreMigration,
 		insertTorrentConfig,
 		insertWakuV2ConfigPostMigration,
@@ -495,13 +485,8 @@ func loadNodeConfig(tx *sql.Tx) (*params.NodeConfig, error) {
 		return nil, err
 	}
 
-	err = tx.QueryRow("SELECT enabled, mobile_system, log_dir, log_level, file, max_backups, max_size, compress_rotated, log_to_stderr FROM log_config WHERE synthetic_id = 'id'").Scan(
-		&nodecfg.LogEnabled, &nodecfg.LogMobileSystem, &nodecfg.LogDir, &nodecfg.LogLevel, &nodecfg.LogFile, &nodecfg.LogMaxBackups, &nodecfg.LogMaxSize, &nodecfg.LogCompressRotated, &nodecfg.LogToStderr)
-	if err != nil && err != sql.ErrNoRows {
-		return nil, err
-	}
-
-	err = tx.QueryRow("SELECT enabled, url FROM upstream_config WHERE synthetic_id = 'id'").Scan(&nodecfg.UpstreamConfig.Enabled, &nodecfg.UpstreamConfig.URL)
+	err = tx.QueryRow("SELECT enabled, log_dir, log_level, log_namespaces, file, max_backups, max_size, compress_rotated, log_to_stderr FROM log_config WHERE synthetic_id = 'id'").Scan(
+		&nodecfg.LogEnabled, &nodecfg.LogDir, &nodecfg.LogLevel, &nodecfg.LogNamespaces, &nodecfg.LogFile, &nodecfg.LogMaxBackups, &nodecfg.LogMaxSize, &nodecfg.LogCompressRotated, &nodecfg.LogToStderr)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, err
 	}
@@ -706,44 +691,10 @@ func loadNodeConfig(tx *sql.Tx) (*params.NodeConfig, error) {
 		nodecfg.WakuV2Config.CustomNodes[name] = multiaddress
 	}
 
-	err = tx.QueryRow(`
-	SELECT enabled, light_client, full_node, enable_mailserver, data_dir, minimum_pow, mailserver_password, mailserver_rate_limit, mailserver_data_retention,
-	ttl, max_message_size, enable_rate_limiter, packet_rate_limit_ip, packet_rate_limit_peer_id, bytes_rate_limit_ip, bytes_rate_limit_peer_id,
-	rate_limit_tolerance, bloom_filter_mode, enable_confirmations
-	FROM waku_config WHERE synthetic_id = 'id'
-	`).Scan(
-		&nodecfg.WakuConfig.Enabled, &nodecfg.WakuConfig.LightClient, &nodecfg.WakuConfig.FullNode, &nodecfg.WakuConfig.EnableMailServer, &nodecfg.WakuConfig.DataDir, &nodecfg.WakuConfig.MinimumPoW,
-		&nodecfg.WakuConfig.MailServerPassword, &nodecfg.WakuConfig.MailServerRateLimit, &nodecfg.WakuConfig.MailServerDataRetention, &nodecfg.WakuConfig.TTL, &nodecfg.WakuConfig.MaxMessageSize,
-		&nodecfg.WakuConfig.EnableRateLimiter, &nodecfg.WakuConfig.PacketRateLimitIP, &nodecfg.WakuConfig.PacketRateLimitPeerID, &nodecfg.WakuConfig.BytesRateLimitIP, &nodecfg.WakuConfig.BytesRateLimitPeerID,
-		&nodecfg.WakuConfig.RateLimitTolerance, &nodecfg.WakuConfig.BloomFilterMode, &nodecfg.WakuConfig.EnableConfirmations,
-	)
-	if err != nil && err != sql.ErrNoRows {
-		return nil, err
-	}
-
-	err = tx.QueryRow("SELECT enabled, uri FROM waku_config_db_pg WHERE synthetic_id = 'id'").Scan(&nodecfg.WakuConfig.DatabaseConfig.PGConfig.Enabled, &nodecfg.WakuConfig.DatabaseConfig.PGConfig.URI)
-	if err != nil && err != sql.ErrNoRows {
-		return nil, err
-	}
-
-	rows, err = tx.Query(`SELECT peer_id FROM waku_softblacklisted_peers WHERE synthetic_id = 'id' ORDER BY peer_id ASC`)
-	if err != nil && err != sql.ErrNoRows {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var peerID string
-		err = rows.Scan(&peerID)
-		if err != nil {
-			return nil, err
-		}
-		nodecfg.WakuConfig.SoftBlacklistedPeerIDs = append(nodecfg.WakuConfig.SoftBlacklistedPeerIDs, peerID)
-	}
-
 	return nodecfg, nil
 }
 
-func MigrateNodeConfig(db *sql.DB) error {
+func MigrateNodeConfig(db *sql.DB) (err error) {
 	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{})
 	if err != nil {
 		return err
@@ -800,6 +751,16 @@ func SetStoreConfirmationForMessagesSent(db *sql.DB, enabled bool) error {
 
 func SetLogLevel(db *sql.DB, logLevel string) error {
 	_, err := db.Exec(`UPDATE log_config SET log_level = ?`, logLevel)
+	return err
+}
+
+func SetLogNamespaces(db *sql.DB, logNamespaces string) error {
+	_, err := db.Exec(`UPDATE log_config SET log_namespaces = ?`, logNamespaces)
+	return err
+}
+
+func SetLogEnabled(db *sql.DB, enabled bool) error {
+	_, err := db.Exec(`UPDATE log_config SET enabled = ?`, enabled)
 	return err
 }
 

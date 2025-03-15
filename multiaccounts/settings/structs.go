@@ -150,12 +150,11 @@ type Settings struct {
 	MessagesFromContactsOnly  bool             `json:"messages-from-contacts-only"`
 	Mnemonic                  *string          `json:"mnemonic,omitempty"`
 	// NOTE(rasom): negation here because it safer/simpler to have false by default
-	MnemonicWasNotShown      bool             `json:"mnemonic-was-not-shown?,omitempty"`
-	MnemonicRemoved          bool             `json:"mnemonic-removed?,omitempty"`
-	OmitTransfersHistoryScan bool             `json:"omit-transfers-history-scan?,omitempty"`
-	MutualContactEnabled     bool             `json:"mutual-contact-enabled?"`
-	Name                     string           `json:"name,omitempty"`
-	Networks                 *json.RawMessage `json:"networks/networks"`
+	MnemonicWasNotShown  bool             `json:"mnemonic-was-not-shown?,omitempty"`
+	MnemonicRemoved      bool             `json:"mnemonic-removed?,omitempty"`
+	MutualContactEnabled bool             `json:"mutual-contact-enabled?"`
+	Name                 string           `json:"name,omitempty"`
+	Networks             *json.RawMessage `json:"networks/networks"`
 	// NotificationsEnabled indicates whether local notifications should be enabled (android only)
 	NotificationsEnabled bool             `json:"notifications-enabled?,omitempty"`
 	PhotoPath            string           `json:"photo-path"`
@@ -215,7 +214,6 @@ type Settings struct {
 	GifAPIKey                           string                        `json:"gifs/api-key"`
 	TestNetworksEnabled                 bool                          `json:"test-networks-enabled?,omitempty"`
 	ProfileMigrationNeeded              bool                          `json:"profile-migration-needed,omitempty"`
-	IsGoerliEnabled                     bool                          `json:"is-goerli-enabled?,omitempty"`
 	TokenGroupByCommunity               bool                          `json:"token-group-by-community?,omitempty"`
 	ShowCommunityAssetWhenSendingTokens bool                          `json:"show-community-asset-when-sending-tokens?,omitempty"`
 	DisplayAssetsBelowBalance           bool                          `json:"display-assets-below-balance?,omitempty"`

@@ -1,0 +1,8 @@
+-- Leave this migration empty
+-- This used to be a migration to add ON DELETE CASCADE to the pinned_messages table
+-- However, we found that it had the side effect of preventing pinned messages to arrive before the messages they are pinned to
+-- Leaving this migration here to prevent the migration from being run again
+-- People that ran the migraiton already will have the wrong behavior on edge cases, but we can't fix that easily
+-- People that didn't run this migration will have the correct behavior
+-- This was never run on a release
+-- See more info here: https://github.com/status-im/status-go/pull/6231#discussion_r1904038990

@@ -25,14 +25,15 @@ import (
 	"github.com/status-im/status-go/multiaccounts/accounts"
 	"github.com/status-im/status-go/multiaccounts/settings"
 
+	"github.com/status-im/status-go/cmd/utils"
 	"github.com/status-im/status-go/logutils"
 	"github.com/status-im/status-go/params"
 	"github.com/status-im/status-go/protocol"
 	"github.com/status-im/status-go/protocol/common"
-	"github.com/status-im/status-go/protocol/common/shard"
 	"github.com/status-im/status-go/protocol/identity/alias"
 	"github.com/status-im/status-go/protocol/protobuf"
-	wakuextn "github.com/status-im/status-go/services/wakuext"
+	wakuextn "github.com/status-im/status-go/services/wakuv2ext"
+	"github.com/status-im/status-go/wakuv2"
 )
 
 const (
@@ -48,17 +49,17 @@ var (
 	seedPhrase       = flag.String("seed-phrase", "", "Seed phrase")
 	version          = flag.Bool("version", false, "Print version and dump configuration")
 	communityID      = flag.String("community-id", "", "The id of the community")
-	shardCluster     = flag.Int("shard-cluster", shard.MainStatusShardCluster, "The shard cluster in which the of the community is published")
-	shardIndex       = flag.Int("shard-index", shard.DefaultShardIndex, "The shard index in which the community is published")
+	shardCluster     = flag.Int("shard-cluster", wakuv2.MainStatusShardCluster, "The shard cluster in which the of the community is published")
+	shardIndex       = flag.Int("shard-index", wakuv2.DefaultShardIndex, "The shard index in which the community is published")
 	chatID           = flag.String("chat-id", "", "The id of the chat")
 
 	dataDir   = flag.String("dir", getDefaultDataDir(), "Directory used by node to store data")
 	networkID = flag.Int(
 		"network-id",
-		params.GoerliNetworkID,
+		params.SepoliaNetworkID,
 		fmt.Sprintf(
-			"A network ID: %d (Mainnet), %d (Goerli)",
-			params.MainNetworkID, params.GoerliNetworkID,
+			"A network ID: %d (Mainnet), %d (Sepolia)",
+			params.MainNetworkID, params.SepoliaNetworkID,
 		),
 	)
 	listenAddr = flag.String("addr", "", "address to bind listener to")
@@ -73,8 +74,11 @@ func init() {
 
 // nolint:gocyclo
 func main() {
-	colors := terminal.IsTerminal(int(os.Stdin.Fd()))
-	if err := logutils.OverrideRootLog(true, "ERROR", logutils.FileOptions{}, colors); err != nil {
+	if err := logutils.OverrideRootLoggerWithConfig(logutils.LogSettings{
+		Enabled:   true,
+		Level:     "ERROR",
+		Colorized: terminal.IsTerminal(int(os.Stdin.Fd())),
+	}); err != nil {
 		stdlog.Fatalf("Error initializing logger: %v", err)
 	}
 
@@ -113,7 +117,7 @@ func main() {
 	}
 
 	// set up logging options
-	setupLogging(config)
+	utils.SetupLogging(logLevel, logWithoutColors, config)
 
 	// We want statusd to be distinct from StatusIM client.
 	config.Name = serverClientName
@@ -123,14 +127,14 @@ func main() {
 		return
 	}
 
-	backend := api.NewGethStatusBackend()
+	backend := api.NewGethStatusBackend(logutils.ZapLogger())
 	err = ImportAccount(*seedPhrase, backend)
 	if err != nil {
 		logger.Error("failed import account", "err", err)
 		return
 	}
 
-	wakuextservice := backend.StatusNode().WakuExtService()
+	wakuextservice := backend.StatusNode().WakuV2ExtService()
 	if wakuextservice == nil {
 		logger.Error("wakuext not available")
 		return
@@ -148,9 +152,9 @@ func main() {
 
 	messenger := wakuextservice.Messenger()
 
-	var s *shard.Shard = nil
+	var s *wakuv2.Shard = nil
 	if shardCluster != nil && shardIndex != nil {
-		s = &shard.Shard{
+		s = &wakuv2.Shard{
 			Cluster: uint16(*shardCluster),
 			Index:   uint16(*shardIndex),
 		}
@@ -226,26 +230,6 @@ func getDefaultDataDir() string {
 		return filepath.Join(home, ".statusd")
 	}
 	return "./statusd-data"
-}
-
-func setupLogging(config *params.NodeConfig) {
-	if *logLevel != "" {
-		config.LogLevel = *logLevel
-	}
-
-	logSettings := logutils.LogSettings{
-		Enabled:         config.LogEnabled,
-		MobileSystem:    config.LogMobileSystem,
-		Level:           config.LogLevel,
-		File:            config.LogFile,
-		MaxSize:         config.LogMaxSize,
-		MaxBackups:      config.LogMaxBackups,
-		CompressRotated: config.LogCompressRotated,
-	}
-	colors := !(*logWithoutColors) && terminal.IsTerminal(int(os.Stdin.Fd()))
-	if err := logutils.OverrideRootLogWithConfig(logSettings, colors); err != nil {
-		stdlog.Fatalf("Error initializing logger: %v", err)
-	}
 }
 
 // printVersion prints verbose output about version and config.
@@ -345,10 +329,6 @@ func defaultNodeConfig(installationID string) (*params.NodeConfig, error) {
 	nodeConfig.NetworkID = 1
 	nodeConfig.LogLevel = "ERROR"
 	nodeConfig.DataDir = api.DefaultDataDir
-	nodeConfig.UpstreamConfig = params.UpstreamRPCConfig{
-		Enabled: true,
-		URL:     "https://mainnet.infura.io/v3/800c641949d64d768a5070a1b0511938",
-	}
 
 	nodeConfig.Name = "StatusIM"
 	clusterConfig, err := params.LoadClusterConfigFromFleet("eth.prod")
@@ -362,10 +342,9 @@ func defaultNodeConfig(installationID string) (*params.NodeConfig, error) {
 	nodeConfig.BrowsersConfig = params.BrowsersConfig{Enabled: true}
 	nodeConfig.PermissionsConfig = params.PermissionsConfig{Enabled: true}
 	nodeConfig.MailserversConfig = params.MailserversConfig{Enabled: true}
-	nodeConfig.WakuConfig = params.WakuConfig{
+	nodeConfig.WakuV2Config = params.WakuV2Config{
 		Enabled:     true,
 		LightClient: true,
-		MinimumPoW:  0.000001,
 	}
 
 	nodeConfig.ShhextConfig = params.ShhextConfig{

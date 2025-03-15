@@ -1,8 +1,8 @@
 #!/usr/bin/env groovy
-library 'status-jenkins-lib@v1.9.6'
+library 'status-jenkins-lib@v1.9.20'
 
 pipeline {
-  agent { label 'linux && x86_64 && nix-2.19' }
+  agent { label 'linux && x86_64 && nix-2.24' }
 
   parameters {
     string(
@@ -45,6 +45,8 @@ pipeline {
       version: env.VERSION,
       ext:     'aar',
     )
+    /* prevent sharing cache dir across different jobs */
+    GO_GENERATE_FAST_DIR = "${env.WORKSPACE_TMP}/go-generate-fast"
   }
 
   stages {
@@ -53,6 +55,12 @@ pipeline {
         sh "mkdir -p \$(dirname ${REPO_SRC})"
         sh "ln -s ${WORKSPACE} ${REPO_SRC}"
       }
+    }
+
+    stage('Generate') {
+      steps { script {
+        nix.shell('make generate', pure: false)
+      } }
     }
 
     stage('Compile') {
@@ -77,6 +85,9 @@ pipeline {
   post {
     success { script { github.notifyPR(true) } }
     failure { script { github.notifyPR(false) } }
-    cleanup { sh 'make deep-clean' }
+    cleanup {
+      cleanWs()
+      dir("${env.WORKSPACE}@tmp") { deleteDir() }
+    }
   } // post
 } // pipeline

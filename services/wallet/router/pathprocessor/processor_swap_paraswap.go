@@ -13,13 +13,15 @@ import (
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/rpc"
 	walletCommon "github.com/status-im/status-go/services/wallet/common"
+	pathProcessorCommon "github.com/status-im/status-go/services/wallet/router/pathprocessor/common"
 	"github.com/status-im/status-go/services/wallet/thirdparty/paraswap"
 	walletToken "github.com/status-im/status-go/services/wallet/token"
+	"github.com/status-im/status-go/services/wallet/wallettypes"
 	"github.com/status-im/status-go/transactions"
 )
 
 type SwapParaswapTxArgs struct {
-	transactions.SendTxArgs
+	wallettypes.SendTxArgs
 	ChainID            uint64  `json:"chainId"`
 	ChainIDTo          uint64  `json:"chainIdTo"`
 	TokenIDFrom        string  `json:"tokenIdFrom"`
@@ -29,6 +31,7 @@ type SwapParaswapTxArgs struct {
 
 type SwapParaswapProcessor struct {
 	paraswapClient paraswap.ClientInterface
+	tokenManager   *walletToken.Manager
 	transactor     transactions.TransactorIface
 	priceRoute     sync.Map // [fromChainName-toChainName-fromTokenSymbol-toTokenSymbol, paraswap.Route]
 }
@@ -47,6 +50,8 @@ func getPartnerAddressAndFeePcnt(chainID uint64) (common.Address, float64) {
 		return common.HexToAddress("0xE9B59dC0b30cd4646430c25de0111D651c395775"), partnerFeePcnt
 	case walletCommon.ArbitrumMainnet:
 		return common.HexToAddress("0x9a8278e856C0B191B9daa2d7DD1f7B28268E4DA2"), partnerFeePcnt
+	case walletCommon.BaseMainnet:
+		return common.Address{}, 0
 	}
 	return common.Address{}, 0
 }
@@ -62,8 +67,9 @@ func NewSwapParaswapProcessor(rpcClient *rpc.Client, transactor transactions.Tra
 			partnerAddress,
 			partnerFeePcnt,
 		),
-		transactor: transactor,
-		priceRoute: sync.Map{},
+		tokenManager: tokenManager,
+		transactor:   transactor,
+		priceRoute:   sync.Map{},
 	}
 }
 
@@ -76,11 +82,11 @@ func createSwapParaswapErrorResponse(err error) error {
 	case "ESTIMATED_LOSS_GREATER_THAN_MAX_IMPACT":
 		return ErrPriceImpactTooHigh
 	}
-	return createErrorResponse(ProcessorSwapParaswapName, err)
+	return createErrorResponse(pathProcessorCommon.ProcessorSwapParaswapName, err)
 }
 
 func (s *SwapParaswapProcessor) Name() string {
-	return ProcessorSwapParaswapName
+	return pathProcessorCommon.ProcessorSwapParaswapName
 }
 
 func (s *SwapParaswapProcessor) Clear() {
@@ -109,35 +115,12 @@ func (s *SwapParaswapProcessor) AvailableFor(params ProcessorInputParams) (bool,
 	s.paraswapClient.SetPartnerAddress(partnerAddress)
 	s.paraswapClient.SetPartnerFeePcnt(partnerFeePcnt)
 
-	searchForToken := params.FromToken.Address == ZeroAddress
-	searchForToToken := params.ToToken.Address == ZeroAddress
-	if searchForToToken || searchForToken {
-		tokensList, err := s.paraswapClient.FetchTokensList(context.Background())
-		if err != nil {
-			return false, createSwapParaswapErrorResponse(err)
-		}
+	if !params.TestsMode {
+		fromToken := s.tokenManager.FindToken(params.FromChain, params.FromToken.Symbol)
+		params.FromToken = fromToken
 
-		for _, t := range tokensList {
-			if searchForToken && t.Symbol == params.FromToken.Symbol {
-				params.FromToken.Address = common.HexToAddress(t.Address)
-				params.FromToken.Decimals = t.Decimals
-				if !searchForToToken {
-					break
-				}
-			}
-
-			if searchForToToken && t.Symbol == params.ToToken.Symbol {
-				params.ToToken.Address = common.HexToAddress(t.Address)
-				params.ToToken.Decimals = t.Decimals
-				if !searchForToken {
-					break
-				}
-			}
-		}
-	}
-
-	if params.FromToken.Address == ZeroAddress || params.ToToken.Address == ZeroAddress {
-		return false, ErrCannotResolveTokens
+		toToken := s.tokenManager.FindToken(params.ToChain, params.ToToken.Symbol)
+		params.ToToken = toToken
 	}
 
 	return true, nil
@@ -161,7 +144,7 @@ func calcReceivedAmountAndFee(baseDestAmount *big.Int, feePcnt float64) (destAmo
 }
 
 func (s *SwapParaswapProcessor) CalculateFees(params ProcessorInputParams) (*big.Int, *big.Int, error) {
-	return ZeroBigIntValue, ZeroBigIntValue, nil
+	return walletCommon.ZeroBigIntValue(), walletCommon.ZeroBigIntValue(), nil
 }
 
 func (s *SwapParaswapProcessor) PackTxInputData(params ProcessorInputParams) ([]byte, error) {
@@ -169,19 +152,27 @@ func (s *SwapParaswapProcessor) PackTxInputData(params ProcessorInputParams) ([]
 	return []byte{}, nil
 }
 
-func (s *SwapParaswapProcessor) EstimateGas(params ProcessorInputParams) (uint64, error) {
+func (s *SwapParaswapProcessor) EstimateGas(params ProcessorInputParams, input []byte) (uint64, error) {
 	if params.TestsMode {
 		if params.TestEstimationMap != nil {
 			if val, ok := params.TestEstimationMap[s.Name()]; ok {
-				return val, nil
+				return val.Value, val.Err
 			}
 		}
 		return 0, ErrNoEstimationFound
 	}
 
 	swapSide := paraswap.SellSide
-	if params.AmountOut != nil && params.AmountOut.Cmp(ZeroBigIntValue) > 0 {
+	if params.AmountOut != nil && params.AmountOut.Cmp(walletCommon.ZeroBigIntValue()) > 0 {
 		swapSide = paraswap.BuySide
+	}
+
+	// TODO: this is an extra check, we should remove it once we set the proper address for the native (ETH) token
+	if params.FromToken.IsNative() {
+		params.FromToken.Address = common.HexToAddress("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee") // ETH address across all chains that we support
+	}
+	if params.ToToken.IsNative() {
+		params.ToToken.Address = common.HexToAddress("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee") // ETH address across all chains that we support
 	}
 
 	priceRoute, err := s.paraswapClient.FetchPriceRoute(context.Background(), params.FromToken.Address, params.FromToken.Decimals,
@@ -190,29 +181,29 @@ func (s *SwapParaswapProcessor) EstimateGas(params ProcessorInputParams) (uint64
 		return 0, createSwapParaswapErrorResponse(err)
 	}
 
-	key := makeKey(params.FromChain.ChainID, params.ToChain.ChainID, params.FromToken.Symbol, params.ToToken.Symbol)
+	key := pathProcessorCommon.MakeKey(params.FromChain.ChainID, params.ToChain.ChainID, params.FromToken.Symbol, params.ToToken.Symbol, params.AmountIn)
 	s.priceRoute.Store(key, &priceRoute)
 
 	return priceRoute.GasCost.Uint64(), nil
 }
 
 func (s *SwapParaswapProcessor) GetContractAddress(params ProcessorInputParams) (address common.Address, err error) {
-	if params.FromChain.ChainID == walletCommon.EthereumMainnet {
-		address = common.HexToAddress("0x216b4b4ba9f3e719726886d34a177484278bfcae")
-	} else if params.FromChain.ChainID == walletCommon.ArbitrumMainnet {
-		address = common.HexToAddress("0x216b4b4ba9f3e719726886d34a177484278bfcae")
-	} else if params.FromChain.ChainID == walletCommon.OptimismMainnet {
-		address = common.HexToAddress("0x216b4b4ba9f3e719726886d34a177484278bfcae")
-	} else {
-		err = ErrContractNotFound
+	key := pathProcessorCommon.MakeKey(params.FromChain.ChainID, params.ToChain.ChainID, params.FromToken.Symbol, params.ToToken.Symbol, params.AmountIn)
+	priceRouteIns, ok := s.priceRoute.Load(key)
+	if !ok {
+		err = ErrPriceRouteNotFound
+		return
 	}
-	return
+	priceRoute := priceRouteIns.(*paraswap.Route)
+
+	return priceRoute.TokenTransferProxy, nil
 }
 
+// TODO: remove this struct once mobile switches to the new approach
 func (s *SwapParaswapProcessor) prepareTransaction(sendArgs *MultipathProcessorTxArgs) error {
 	slippageBP := uint(sendArgs.SwapTx.SlippagePercentage * 100) // convert to basis points
 
-	key := makeKey(sendArgs.SwapTx.ChainID, sendArgs.SwapTx.ChainIDTo, sendArgs.SwapTx.TokenIDFrom, sendArgs.SwapTx.TokenIDTo)
+	key := pathProcessorCommon.MakeKey(sendArgs.SwapTx.ChainID, sendArgs.SwapTx.ChainIDTo, sendArgs.SwapTx.TokenIDFrom, sendArgs.SwapTx.TokenIDTo, sendArgs.SwapTx.ValueIn.ToInt())
 	priceRouteIns, ok := s.priceRoute.Load(key)
 	if !ok {
 		return ErrPriceRouteNotFound
@@ -255,12 +246,65 @@ func (s *SwapParaswapProcessor) prepareTransaction(sendArgs *MultipathProcessorT
 	return nil
 }
 
+func (s *SwapParaswapProcessor) prepareTransactionV2(sendArgs *wallettypes.SendTxArgs) error {
+	slippageBP := uint(sendArgs.SlippagePercentage * 100) // convert to basis points
+
+	key := pathProcessorCommon.MakeKey(sendArgs.FromChainID, sendArgs.ToChainID, sendArgs.FromTokenID, sendArgs.ToTokenID, sendArgs.ValueIn.ToInt())
+	priceRouteIns, ok := s.priceRoute.Load(key)
+	if !ok {
+		return ErrPriceRouteNotFound
+	}
+	priceRoute := priceRouteIns.(*paraswap.Route)
+
+	tx, err := s.paraswapClient.BuildTransaction(context.Background(), priceRoute.SrcTokenAddress, priceRoute.SrcTokenDecimals, priceRoute.SrcAmount.Int,
+		priceRoute.DestTokenAddress, priceRoute.DestTokenDecimals, priceRoute.DestAmount.Int, slippageBP,
+		common.Address(sendArgs.From), common.Address(*sendArgs.To),
+		priceRoute.RawPriceRoute, priceRoute.Side)
+	if err != nil {
+		return createSwapParaswapErrorResponse(err)
+	}
+
+	value, ok := new(big.Int).SetString(tx.Value, 10)
+	if !ok {
+		return ErrConvertingAmountToBigInt
+	}
+
+	gas, err := strconv.ParseUint(tx.Gas, 10, 64)
+	if err != nil {
+		return createSwapParaswapErrorResponse(err)
+	}
+
+	gasPrice, ok := new(big.Int).SetString(tx.GasPrice, 10)
+	if !ok {
+		return ErrConvertingAmountToBigInt
+	}
+
+	sendArgs.FromChainID = tx.ChainID
+	toAddr := types.HexToAddress(tx.To)
+	sendArgs.From = types.HexToAddress(tx.From)
+	sendArgs.To = &toAddr
+	sendArgs.Value = (*hexutil.Big)(value)
+	sendArgs.Gas = (*hexutil.Uint64)(&gas)
+	sendArgs.GasPrice = (*hexutil.Big)(gasPrice)
+	sendArgs.Data = types.Hex2Bytes(tx.Data)
+
+	return nil
+}
+
 func (s *SwapParaswapProcessor) BuildTransaction(sendArgs *MultipathProcessorTxArgs, lastUsedNonce int64) (*ethTypes.Transaction, uint64, error) {
 	err := s.prepareTransaction(sendArgs)
 	if err != nil {
 		return nil, 0, createSwapParaswapErrorResponse(err)
 	}
 	return s.transactor.ValidateAndBuildTransaction(sendArgs.ChainID, sendArgs.SwapTx.SendTxArgs, lastUsedNonce)
+}
+
+func (s *SwapParaswapProcessor) BuildTransactionV2(sendArgs *wallettypes.SendTxArgs, lastUsedNonce int64) (*ethTypes.Transaction, uint64, error) {
+	err := s.prepareTransactionV2(sendArgs)
+	if err != nil {
+		return nil, 0, createSwapParaswapErrorResponse(err)
+	}
+	return s.transactor.ValidateAndBuildTransaction(sendArgs.FromChainID, *sendArgs, lastUsedNonce)
 }
 
 func (s *SwapParaswapProcessor) Send(sendArgs *MultipathProcessorTxArgs, lastUsedNonce int64, verifiedAccount *account.SelectedExtKey) (types.Hash, uint64, error) {
@@ -273,7 +317,7 @@ func (s *SwapParaswapProcessor) Send(sendArgs *MultipathProcessorTxArgs, lastUse
 }
 
 func (s *SwapParaswapProcessor) CalculateAmountOut(params ProcessorInputParams) (*big.Int, error) {
-	key := makeKey(params.FromChain.ChainID, params.ToChain.ChainID, params.FromToken.Symbol, params.ToToken.Symbol)
+	key := pathProcessorCommon.MakeKey(params.FromChain.ChainID, params.ToChain.ChainID, params.FromToken.Symbol, params.ToToken.Symbol, params.AmountIn)
 	priceRouteIns, ok := s.priceRoute.Load(key)
 	if !ok {
 		return nil, ErrPriceRouteNotFound

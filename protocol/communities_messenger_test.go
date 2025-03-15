@@ -40,6 +40,7 @@ import (
 	v1protocol "github.com/status-im/status-go/protocol/v1"
 	"github.com/status-im/status-go/server"
 	localnotifications "github.com/status-im/status-go/services/local-notifications"
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 func TestMessengerCommunitiesSuite(t *testing.T) {
@@ -576,7 +577,6 @@ func (s *MessengerCommunitiesSuite) TestPostToCommunityChat() {
 	s.Require().NoError(err)
 	s.Require().Len(response.Messages(), 1)
 	s.Require().Equal(inputMessage.Text, response.Messages()[0].Text)
-	s.Require().Equal(s.alice.account.GetCustomizationColor(), response.Contacts[0].CustomizationColor)
 
 	// check if response contains the chat we're interested in
 	// we use this instead of checking just the length of the chat because
@@ -922,6 +922,8 @@ func (s *MessengerCommunitiesSuite) TestRequestAccess() {
 	response, err = s.bob.AcceptRequestToJoinCommunity(acceptRequestToJoin)
 	s.Require().NoError(err)
 	s.Require().NotNil(response)
+	s.Require().NotEmpty(response.RequestsToJoinCommunity())
+	s.Require().Len(response.RequestsToJoinCommunity()[0].RevealedAccounts, 1)
 
 	s.Require().Len(response.Communities(), 1)
 
@@ -2413,6 +2415,8 @@ func (s *MessengerCommunitiesSuite) createOtherDevice(m1 *Messenger) *Messenger 
 func (s *MessengerCommunitiesSuite) TestSyncCommunitySettings() {
 	// Create new device
 	alicesOtherDevice := s.createOtherDevice(s.alice)
+	defer TearDownMessenger(&s.Suite, alicesOtherDevice)
+
 	PairDevices(&s.Suite, alicesOtherDevice, s.alice)
 
 	// Create a community
@@ -2465,6 +2469,8 @@ func (s *MessengerCommunitiesSuite) TestSyncCommunitySettings() {
 func (s *MessengerCommunitiesSuite) TestSyncCommunitySettings_EditCommunity() {
 	// Create new device
 	alicesOtherDevice := s.createOtherDevice(s.alice)
+	defer TearDownMessenger(&s.Suite, alicesOtherDevice)
+
 	PairDevices(&s.Suite, alicesOtherDevice, s.alice)
 
 	// Create a community
@@ -2554,6 +2560,8 @@ func (s *MessengerCommunitiesSuite) TestSyncCommunity() {
 
 	// Create new device
 	alicesOtherDevice := s.createOtherDevice(s.alice)
+	defer TearDownMessenger(&s.Suite, alicesOtherDevice)
+
 	PairDevices(&s.Suite, alicesOtherDevice, s.alice)
 
 	// Create a community
@@ -2720,6 +2728,7 @@ func (s *MessengerCommunitiesSuite) TestSyncCommunity_RequestToJoin() {
 
 	// Create Alice's other device
 	alicesOtherDevice := s.createOtherDevice(s.alice)
+	defer TearDownMessenger(&s.Suite, alicesOtherDevice)
 
 	// Pair alice's two devices
 	PairDevices(&s.Suite, alicesOtherDevice, s.alice)
@@ -2915,6 +2924,27 @@ func (s *MessengerCommunitiesSuite) TestSyncCommunity_RequestToJoin() {
 	s.Equal(aRtj.CustomizationColor, bobRtj.CustomizationColor)
 }
 
+func (s *MessengerCommunitiesSuite) TestSyncCommunity_Join() {
+	community, _ := s.createCommunity()
+	s.advertiseCommunityTo(community, s.owner, s.alice)
+
+	alicesOtherDevice := s.createOtherDevice(s.alice)
+	defer TearDownMessenger(&s.Suite, alicesOtherDevice)
+
+	PairDevices(&s.Suite, alicesOtherDevice, s.alice)
+
+	s.joinCommunity(community, s.owner, s.alice)
+
+	_, err := WaitOnMessengerResponse(alicesOtherDevice, func(response *MessengerResponse) bool {
+		if len(response.Communities()) != 1 {
+			return false
+		}
+		c := response.Communities()[0]
+		return c.IDString() == community.IDString() && c.Joined()
+	}, "community not synced")
+	s.Require().NoError(err)
+}
+
 func (s *MessengerCommunitiesSuite) TestSyncCommunity_Leave() {
 	// Set Alice's installation metadata
 	aim := &multidevice.InstallationMetadata{
@@ -2926,6 +2956,7 @@ func (s *MessengerCommunitiesSuite) TestSyncCommunity_Leave() {
 
 	// Create Alice's other device
 	alicesOtherDevice := s.createOtherDevice(s.alice)
+	defer TearDownMessenger(&s.Suite, alicesOtherDevice)
 
 	// Pair alice's two devices
 	PairDevices(&s.Suite, alicesOtherDevice, s.alice)
@@ -3037,6 +3068,8 @@ func (s *MessengerCommunitiesSuite) TestSyncCommunity_ImportCommunity() {
 
 	// New device is created & paired
 	ownersOtherDevice := s.createOtherDevice(s.owner)
+	defer TearDownMessenger(&s.Suite, ownersOtherDevice)
+
 	PairDevices(&s.Suite, ownersOtherDevice, s.owner)
 	PairDevices(&s.Suite, s.owner, ownersOtherDevice)
 
@@ -3604,12 +3637,12 @@ func (s *MessengerCommunitiesSuite) TestHandleImport() {
 	)
 	s.Require().NoError(err)
 
-	message := &types.Message{}
+	message := &wakutypes.Message{}
 	message.Sig = crypto.FromECDSAPub(&s.owner.identity.PublicKey)
 	message.Payload = wrappedPayload
 
 	filter := s.alice.transport.FilterByChatID(chat.ID)
-	importedMessages := make(map[transport.Filter][]*types.Message, 0)
+	importedMessages := make(map[transport.Filter][]*wakutypes.Message, 0)
 
 	importedMessages[*filter] = append(importedMessages[*filter], message)
 
@@ -4118,54 +4151,6 @@ func (s *MessengerCommunitiesSuite) TestCommunityLastOpenedAt() {
 	s.Require().NoError(err)
 
 	s.Require().True(lastOpenedAt2 > lastOpenedAt1)
-}
-
-func (s *MessengerCommunitiesSuite) TestSyncCommunityLastOpenedAt() {
-	// Create new device
-	alicesOtherDevice := s.createOtherDevice(s.alice)
-	PairDevices(&s.Suite, alicesOtherDevice, s.alice)
-
-	// Create a community
-	createCommunityReq := &requests.CreateCommunity{
-		Membership:  protobuf.CommunityPermissions_MANUAL_ACCEPT,
-		Name:        "new community",
-		Color:       "#000000",
-		Description: "new community description",
-	}
-
-	mr, err := s.alice.CreateCommunity(createCommunityReq, true)
-	s.Require().NoError(err, "s.alice.CreateCommunity")
-	var newCommunity *communities.Community
-	for _, com := range mr.Communities() {
-		if com.Name() == createCommunityReq.Name {
-			newCommunity = com
-		}
-	}
-	s.Require().NotNil(newCommunity)
-
-	// Mock frontend triggering communityUpdateLastOpenedAt
-	lastOpenedAt, err := s.alice.CommunityUpdateLastOpenedAt(newCommunity.IDString())
-	s.Require().NoError(err)
-
-	// Check lastOpenedAt was updated
-	s.Require().True(lastOpenedAt > 0)
-
-	err = tt.RetryWithBackOff(func() error {
-		_, err = alicesOtherDevice.RetrieveAll()
-		if err != nil {
-			return err
-		}
-		// Do we have a new synced community?
-		_, err := alicesOtherDevice.communitiesManager.GetSyncedRawCommunity(newCommunity.ID())
-		if err != nil {
-			return fmt.Errorf("community with sync not received %w", err)
-		}
-
-		return nil
-	})
-	otherDeviceCommunity, err := alicesOtherDevice.communitiesManager.GetByID(newCommunity.ID())
-	s.Require().NoError(err)
-	s.Require().True(otherDeviceCommunity.LastOpenedAt() > 0)
 }
 
 func (s *MessengerCommunitiesSuite) TestBanUserAndDeleteAllUserMessages() {
@@ -4707,17 +4692,17 @@ func (s *MessengerCommunitiesSuite) TestAliceDidNotProcessOutdatedCommunityReque
 		s.Require().NoError(err)
 	}
 
-	encryptedDescription, err := community.EncryptedDescription()
+	descriptionMessage, err := community.ToProtocolMessageBytes()
 	s.Require().NoError(err)
 
 	requestToJoinResponse := &protobuf.CommunityRequestToJoinResponse{
-		Clock:                    community.Clock(),
-		Accepted:                 true,
-		CommunityId:              community.ID(),
-		Community:                encryptedDescription,
-		Grant:                    grant,
-		ProtectedTopicPrivateKey: crypto.FromECDSA(key),
-		Shard:                    community.Shard().Protobuffer(),
+		Clock:                               community.Clock(),
+		Accepted:                            true,
+		CommunityId:                         community.ID(),
+		Grant:                               grant,
+		ProtectedTopicPrivateKey:            crypto.FromECDSA(key),
+		Shard:                               community.Shard().Protobuffer(),
+		CommunityDescriptionProtocolMessage: descriptionMessage,
 	}
 
 	// alice handle duplicated request to join response

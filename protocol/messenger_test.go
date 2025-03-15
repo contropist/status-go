@@ -25,11 +25,15 @@ import (
 	"github.com/status-im/status-go/images"
 	"github.com/status-im/status-go/multiaccounts/settings"
 	"github.com/status-im/status-go/protocol/common"
+	"github.com/status-im/status-go/protocol/communities"
 	"github.com/status-im/status-go/protocol/protobuf"
 	"github.com/status-im/status-go/protocol/requests"
 	"github.com/status-im/status-go/protocol/tt"
 	v1protocol "github.com/status-im/status-go/protocol/v1"
 	"github.com/status-im/status-go/server"
+	"github.com/status-im/status-go/timesource"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 const (
@@ -50,7 +54,7 @@ type MessengerSuite struct {
 }
 
 type testNode struct {
-	shh types.Waku
+	shh wakutypes.Waku
 }
 
 func (n *testNode) NewENSVerifier(_ *zap.Logger) enstypes.ENSVerifier {
@@ -65,16 +69,8 @@ func (n *testNode) RemovePeer(_ string) error {
 	panic("not implemented")
 }
 
-func (n *testNode) GetWaku(_ interface{}) (types.Waku, error) {
+func (n *testNode) GetWakuV2(_ interface{}) (wakutypes.Waku, error) {
 	return n.shh, nil
-}
-
-func (n *testNode) GetWakuV2(_ interface{}) (types.Waku, error) {
-	return nil, errors.New("No waku v2 support")
-}
-
-func (n *testNode) GetWhisper(_ interface{}) (types.Whisper, error) {
-	return nil, nil
 }
 
 func (n *testNode) PeersCount() int {
@@ -329,7 +325,8 @@ func (s *MessengerSuite) TestMarkAllRead() {
 
 func (s *MessengerSuite) TestSendPublic() {
 	chat := CreatePublicChat("test-chat", s.m.transport)
-	chat.LastClockValue = uint64(100000000000000)
+	clock := getTimeWithAllowedFutureDrift()
+	chat.LastClockValue = clock
 	err := s.m.SaveChat(chat)
 	s.NoError(err)
 	inputMessage := buildTestMessage(*chat)
@@ -339,8 +336,8 @@ func (s *MessengerSuite) TestSendPublic() {
 	s.Require().Equal(1, len(response.Messages()), "it returns the message")
 	outputMessage := response.Messages()[0]
 
-	s.Require().Equal(uint64(100000000000001), outputMessage.Clock, "it correctly sets the clock")
-	s.Require().Equal(uint64(100000000000001), chat.LastClockValue, "it correctly sets the last-clock-value")
+	s.Require().Equal(clock+1, outputMessage.Clock, "it correctly sets the clock")
+	s.Require().Equal(clock+1, chat.LastClockValue, "it correctly sets the last-clock-value")
 	s.Require().NotEqual(uint64(0), chat.Timestamp, "it sets the timestamp")
 	s.Require().Equal("0x"+hex.EncodeToString(crypto.FromECDSAPub(&s.privateKey.PublicKey)), outputMessage.From, "it sets the From field")
 	s.Require().True(outputMessage.Seen, "it marks the message as seen")
@@ -393,7 +390,8 @@ func (s *MessengerSuite) TestSendPrivateOneToOne() {
 
 	inputMessage := common.NewMessage()
 	inputMessage.ChatId = chat.ID
-	chat.LastClockValue = uint64(100000000000000)
+	clock := getTimeWithAllowedFutureDrift()
+	chat.LastClockValue = clock
 	err = s.m.SaveChat(chat)
 	s.NoError(err)
 	response, err := s.m.SendChatMessage(context.Background(), inputMessage)
@@ -401,8 +399,8 @@ func (s *MessengerSuite) TestSendPrivateOneToOne() {
 	s.Require().Equal(1, len(response.Messages()), "it returns the message")
 	outputMessage := response.Messages()[0]
 
-	s.Require().Equal(uint64(100000000000001), outputMessage.Clock, "it correctly sets the clock")
-	s.Require().Equal(uint64(100000000000001), chat.LastClockValue, "it correctly sets the last-clock-value")
+	s.Require().Equal(clock+1, outputMessage.Clock, "it correctly sets the clock")
+	s.Require().Equal(clock+1, chat.LastClockValue, "it correctly sets the last-clock-value")
 
 	s.Require().NotEqual(uint64(0), chat.Timestamp, "it sets the timestamp")
 	s.Require().Equal("0x"+hex.EncodeToString(crypto.FromECDSAPub(&s.privateKey.PublicKey)), outputMessage.From, "it sets the From field")
@@ -429,7 +427,8 @@ func (s *MessengerSuite) TestSendPrivateGroup() {
 
 	inputMessage := common.NewMessage()
 	inputMessage.ChatId = chat.ID
-	chat.LastClockValue = uint64(100000000000000)
+	clock := getTimeWithAllowedFutureDrift()
+	chat.LastClockValue = clock
 	err = s.m.SaveChat(chat)
 	s.NoError(err)
 	response, err = s.m.SendChatMessage(context.Background(), inputMessage)
@@ -437,8 +436,8 @@ func (s *MessengerSuite) TestSendPrivateGroup() {
 	s.Require().Equal(1, len(response.Messages()), "it returns the message")
 	outputMessage := response.Messages()[0]
 
-	s.Require().Equal(uint64(100000000000001), outputMessage.Clock, "it correctly sets the clock")
-	s.Require().Equal(uint64(100000000000001), chat.LastClockValue, "it correctly sets the last-clock-value")
+	s.Require().Equal(clock+1, outputMessage.Clock, "it correctly sets the clock")
+	s.Require().Equal(clock+1, chat.LastClockValue, "it correctly sets the last-clock-value")
 
 	s.Require().NotEqual(uint64(0), chat.Timestamp, "it sets the timestamp")
 	s.Require().Equal("0x"+hex.EncodeToString(crypto.FromECDSAPub(&s.privateKey.PublicKey)), outputMessage.From, "it sets the From field")
@@ -457,7 +456,8 @@ func (s *MessengerSuite) TestSendPrivateEmptyGroup() {
 
 	inputMessage := common.NewMessage()
 	inputMessage.ChatId = chat.ID
-	chat.LastClockValue = uint64(100000000000000)
+	clock := getTimeWithAllowedFutureDrift()
+	chat.LastClockValue = clock
 	err = s.m.SaveChat(chat)
 	s.NoError(err)
 	response, err = s.m.SendChatMessage(context.Background(), inputMessage)
@@ -465,8 +465,8 @@ func (s *MessengerSuite) TestSendPrivateEmptyGroup() {
 	s.Require().Equal(1, len(response.Messages()), "it returns the message")
 	outputMessage := response.Messages()[0]
 
-	s.Require().Equal(uint64(100000000000001), outputMessage.Clock, "it correctly sets the clock")
-	s.Require().Equal(uint64(100000000000001), chat.LastClockValue, "it correctly sets the last-clock-value")
+	s.Require().Equal(clock+1, outputMessage.Clock, "it correctly sets the clock")
+	s.Require().Equal(clock+1, chat.LastClockValue, "it correctly sets the last-clock-value")
 
 	s.Require().NotEqual(uint64(0), chat.Timestamp, "it sets the timestamp")
 	s.Require().Equal("0x"+hex.EncodeToString(crypto.FromECDSAPub(&s.privateKey.PublicKey)), outputMessage.From, "it sets the From field")
@@ -2514,4 +2514,121 @@ func (s *MessengerSuite) TestSendMessageMention() {
 	response, err := WaitOnMessengerResponse(alice, func(r *MessengerResponse) bool { return len(r.Notifications()) >= 1 }, "no messages")
 	s.Require().NoError(err)
 	s.Require().Equal("Alice talk to bobby", response.Notifications()[0].Message)
+}
+
+func (s *MessengerSuite) TestInitChatsFirstMessageTimestamp() {
+	createRequest := &requests.CreateCommunity{
+		Name:        "status",
+		Description: "status community description",
+		Membership:  protobuf.CommunityPermissions_AUTO_ACCEPT,
+	}
+	communityManager := s.m.communitiesManager
+	c, err := communityManager.CreateCommunity(createRequest, true)
+	s.Require().NoError(err)
+	s.Require().NotNil(c)
+
+	chat := &protobuf.CommunityChat{
+		Identity: &protobuf.ChatIdentity{
+			DisplayName: "chat1",
+			Description: "description",
+		},
+		Permissions: &protobuf.CommunityPermissions{
+			Access: protobuf.CommunityPermissions_AUTO_ACCEPT,
+		},
+		Members: make(map[string]*protobuf.CommunityMember),
+	}
+	_, err = s.m.CreateCommunityChat(c.ID(), chat)
+	s.Require().NoError(err)
+
+	community, err := communityManager.GetByID(c.ID())
+	s.Require().NoError(err)
+	s.Require().Len(community.Chats(), 1)
+
+	communityDefaultChat, ok := s.m.allChats.Load(community.ChatIDs()[0])
+	s.Require().True(ok)
+	s.Require().Equal(FirstMessageTimestampNoMessage, int(communityDefaultChat.FirstMessageTimestamp))
+
+	// prepared community and chat, now start test each case
+	// case 1: FirstMessageTimestamp is FirstMessageTimestampNoMessage, so no changes in communityCache
+	communityCache := make(map[string]*communities.Community)
+	s.m.initChatsFirstMessageTimestamp(communityCache, []*Chat{communityDefaultChat})
+	// chat FirstMessageTimestamp is FirstMessageTimestampNoMessage, so no changes in communityCache
+	s.Require().Len(communityCache, 0)
+
+	// case 2: FirstMessageTimestamp is FirstMessageTimestampUndefined,
+	// for oldestMessageTimestamp, ok := oldestMessageTimestamps[chat.ID] within initChatsFirstMessageTimestamp
+	// now `ok` will be false but 1 change expected in communityCache
+	forceFirstMessageTimestampUndefined := func() {
+		// force FirstMessageTimestamp to FirstMessageTimestampUndefined so we can still get chats after filterCommunityChats
+		communityDefaultChat.FirstMessageTimestamp = FirstMessageTimestampUndefined
+		err = s.m.SaveChat(communityDefaultChat)
+		s.Require().NoError(err)
+	}
+	forceFirstMessageTimestampUndefined()
+	communityCache = make(map[string]*communities.Community)
+	s.m.initChatsFirstMessageTimestamp(communityCache, []*Chat{communityDefaultChat})
+	s.Require().Len(communityCache, 1)
+
+	// case 3: FirstMessageTimestamp is FirstMessageTimestampUndefined and send a message,
+	// for oldestMessageTimestamp, ok := oldestMessageTimestamps[chat.ID] within initChatsFirstMessageTimestamp
+	// now `ok` will be true, `oldestMessageTimestamp`(e.g. 1728886305475) will be greater than 1
+	msg := &common.Message{CommunityID: community.IDString(), ChatMessage: &protobuf.ChatMessage{
+		Text:        "text",
+		ChatId:      communityDefaultChat.ID,
+		MessageType: protobuf.MessageType_COMMUNITY_CHAT,
+		ContentType: protobuf.ChatMessage_TEXT_PLAIN,
+	}}
+	_, err = s.m.sendChatMessage(context.Background(), msg)
+	s.Require().NoError(err)
+	forceFirstMessageTimestampUndefined()
+	communityCache = make(map[string]*communities.Community)
+	s.m.initChatsFirstMessageTimestamp(communityCache, []*Chat{communityDefaultChat})
+	s.Require().Len(communityCache, 1)
+	s.Require().Greater(communityDefaultChat.FirstMessageTimestamp, uint32(1))
+}
+
+func (s *MessengerSuite) TestFilterCommunityChats() {
+	communityChat1 := &Chat{
+		ID:                    "community-chat-1",
+		ChatType:              ChatTypeCommunityChat,
+		FirstMessageTimestamp: FirstMessageTimestampUndefined,
+	}
+	communityChat2 := &Chat{
+		ID:                    "community-chat-2",
+		ChatType:              ChatTypeCommunityChat,
+		FirstMessageTimestamp: FirstMessageTimestampUndefined,
+	}
+	nonCommunityChat := &Chat{
+		ID:       "non-community-chat",
+		ChatType: ChatTypeOneToOne,
+	}
+	communityWithTimestamp := &Chat{
+		ID:                    "community-with-timestamp",
+		ChatType:              ChatTypeCommunityChat,
+		FirstMessageTimestamp: 12345,
+	}
+
+	chats := []*Chat{communityChat1, nonCommunityChat, communityChat2, communityWithTimestamp}
+
+	filteredChats, filteredIDs := s.m.filterCommunityChats(chats)
+
+	s.Require().Len(filteredChats, 2, "Should have filtered 2 community chats")
+	s.Require().Len(filteredIDs, 2, "Should have 2 community chat IDs")
+
+	s.Require().Contains(filteredChats, communityChat1, "Should contain communityChat1")
+	s.Require().Contains(filteredChats, communityChat2, "Should contain communityChat2")
+
+	s.Require().Contains(filteredIDs, communityChat1.ID, "Should contain ID of communityChat1")
+	s.Require().Contains(filteredIDs, communityChat2.ID, "Should contain ID of communityChat2")
+
+	s.Require().NotContains(filteredChats, nonCommunityChat, "Should not contain nonCommunityChat")
+	s.Require().NotContains(filteredChats, communityWithTimestamp, "Should not contain communityWithTimestamp")
+
+	s.Require().NotContains(filteredIDs, nonCommunityChat.ID, "Should not contain ID of nonCommunityChat")
+	s.Require().NotContains(filteredIDs, communityWithTimestamp.ID, "Should not contain ID of communityWithTimestamp")
+}
+
+func getTimeWithAllowedFutureDrift() uint64 {
+	currentTime := timesource.GetCurrentTimeInMillis()
+	return currentTime + MaxWhisperFutureDriftMs/2
 }

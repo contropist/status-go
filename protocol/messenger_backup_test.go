@@ -6,9 +6,16 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
+
+	"go.uber.org/zap"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/event"
 
 	v1protocol "github.com/status-im/status-go/protocol/v1"
 	"github.com/status-im/status-go/protocol/wakusync"
+	"github.com/status-im/status-go/services/accounts/accountsevent"
 
 	"github.com/stretchr/testify/suite"
 
@@ -252,6 +259,162 @@ func (s *MessengerBackupSuite) TestBackupProfileWithInvalidDisplayName() {
 	storedBob1DisplayName, err := bob1.settings.DisplayName()
 	s.Require().NoError(err)
 	s.Require().Equal("", storedBob1DisplayName)
+}
+
+func (s *MessengerBackupSuite) TestFetchingDuringBackup() {
+	bob1 := s.m
+	bob1.config.messengerSignalsHandler = &MessengerSignalsHandlerMock{
+		wakuBackedUpDataResponseChan: make(chan *wakusync.WakuBackedUpDataResponse, 1000),
+	}
+
+	state := ReceivedMessageState{
+		Response: &MessengerResponse{},
+	}
+
+	backup := &protobuf.Backup{
+		Clock: 1,
+		ContactsDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(0),
+			TotalNumber: uint32(1),
+		},
+		CommunitiesDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(0),
+			TotalNumber: uint32(1),
+		},
+		ProfileDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(0),
+			TotalNumber: uint32(1),
+		},
+	}
+
+	err := bob1.HandleBackup(
+		&state,
+		backup,
+		&v1protocol.StatusMessage{},
+	)
+	s.Require().NoError(err)
+	// The backup is not done, so no signal should be sent
+	s.Require().Len(state.Response.ActivityCenterNotifications(), 0)
+	s.Require().Len(bob1.backedUpFetchingStatus.dataProgress, 3)
+	s.Require().Equal(uint32(1), bob1.backedUpFetchingStatus.dataProgress[SyncWakuSectionKeyContacts].TotalNumber)
+
+	// Parse a backup with a higher clock so reset the fetching
+	backup = &protobuf.Backup{
+		Clock: 2,
+		ContactsDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(0),
+			TotalNumber: uint32(2),
+		},
+		CommunitiesDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(0),
+			TotalNumber: uint32(1),
+		},
+		ProfileDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(0),
+			TotalNumber: uint32(1),
+		},
+		SettingsDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(0),
+			TotalNumber: uint32(1),
+		},
+		KeypairDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(0),
+			TotalNumber: uint32(1),
+		},
+		WatchOnlyAccountDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(0),
+			TotalNumber: uint32(1),
+		},
+	}
+	err = bob1.HandleBackup(
+		&state,
+		backup,
+		&v1protocol.StatusMessage{},
+	)
+	s.Require().NoError(err)
+	// The backup is not done, so no signal should be sent
+	s.Require().Len(state.Response.ActivityCenterNotifications(), 0)
+	s.Require().Len(bob1.backedUpFetchingStatus.dataProgress, 6)
+	s.Require().Equal(uint32(2), bob1.backedUpFetchingStatus.dataProgress[SyncWakuSectionKeyContacts].TotalNumber)
+
+	// Backup with a smaller clock is ignored
+	backup = &protobuf.Backup{
+		Clock: 2,
+		ContactsDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(0),
+			TotalNumber: uint32(5),
+		},
+		CommunitiesDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(0),
+			TotalNumber: uint32(1),
+		},
+	}
+	err = bob1.HandleBackup(
+		&state,
+		backup,
+		&v1protocol.StatusMessage{},
+	)
+	s.Require().NoError(err)
+	// The backup is not done, so no signal should be sent
+	s.Require().Len(state.Response.ActivityCenterNotifications(), 0)
+	// The values are gonna be the same as before as the backup was ignored
+	s.Require().Len(bob1.backedUpFetchingStatus.dataProgress, 6)
+	s.Require().Equal(uint32(2), bob1.backedUpFetchingStatus.dataProgress[SyncWakuSectionKeyContacts].TotalNumber)
+
+	// Parse the backup with almost all the correct data numbers
+	backup = &protobuf.Backup{
+		Clock: 2,
+		ContactsDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(1),
+			TotalNumber: uint32(2),
+		},
+		CommunitiesDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(1),
+			TotalNumber: uint32(1),
+		},
+		ProfileDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(1),
+			TotalNumber: uint32(1),
+		},
+		SettingsDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(1),
+			TotalNumber: uint32(1),
+		},
+		KeypairDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(1),
+			TotalNumber: uint32(1),
+		},
+		WatchOnlyAccountDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(1),
+			TotalNumber: uint32(1),
+		},
+	}
+	err = bob1.HandleBackup(
+		&state,
+		backup,
+		&v1protocol.StatusMessage{},
+	)
+	s.Require().NoError(err)
+	// The backup is not done, so no signal should be sent
+	s.Require().Len(state.Response.ActivityCenterNotifications(), 0)
+
+	// Parse the remaining backup so the notification should be sent now
+	backup = &protobuf.Backup{
+		Clock: 2,
+		ContactsDetails: &protobuf.FetchingBackedUpDataDetails{
+			DataNumber:  uint32(2),
+			TotalNumber: uint32(2),
+		},
+	}
+	err = bob1.HandleBackup(
+		&state,
+		backup,
+		&v1protocol.StatusMessage{},
+	)
+	s.Require().NoError(err)
+	// The backup is done, so the signal should be sent
+	s.Require().Len(state.Response.ActivityCenterNotifications(), 1)
+	s.Require().Equal(ActivityCenterNotificationTypeBackupSyncingSuccess, state.Response.ActivityCenterNotifications()[0].Type)
 }
 
 func (s *MessengerBackupSuite) TestBackupSettings() {
@@ -697,8 +860,12 @@ func (s *MessengerBackupSuite) TestBackupKeypairs() {
 	s.Require().True(accounts.SameKeypairs(seedKp, dbSeedKp1))
 
 	// Create bob2
-	bob2, err := newMessengerWithKey(s.shh, bob1.identity, s.logger, nil)
+	accountsFeed := &event.Feed{}
+	bob2, err := newMessengerWithKey(s.shh, bob1.identity, s.logger, []Option{WithAccountsFeed(accountsFeed)})
 	s.Require().NoError(err)
+	s.Require().NotNil(bob2.config.accountsFeed)
+	ch := make(chan accountsevent.Event, 20)
+	sub := bob2.config.accountsFeed.Subscribe(ch)
 	defer TearDownMessenger(&s.Suite, bob2)
 
 	// Backup
@@ -728,6 +895,40 @@ func (s *MessengerBackupSuite) TestBackupKeypairs() {
 	dbSeedKp2, err := bob2.settings.GetKeypairByKeyUID(seedKp.KeyUID)
 	s.Require().NoError(err)
 	s.Require().True(accounts.SameKeypairsWithDifferentSyncedFrom(seedKp, dbSeedKp2, false, accounts.SyncedFromBackup, accounts.AccountNonOperable))
+
+	keypairs, err := bob2.settings.GetAllKeypairs()
+	s.Require().NoError(err)
+
+	// Check whether accounts added event is sent
+	expectedAddresses := make(map[common.Address]struct{}, 0)
+	for _, acc := range dbProfileKp2.Accounts {
+		if acc.Chat {
+			continue
+		}
+		expectedAddresses[common.Address(acc.Address)] = struct{}{}
+	}
+
+	for _, acc := range dbSeedKp2.Accounts {
+		expectedAddresses[common.Address(acc.Address)] = struct{}{}
+	}
+
+	for i := 0; i < len(keypairs); i++ {
+		select {
+		case <-time.After(1 * time.Second):
+			s.Fail("Timed out waiting for accountsevent")
+		case event := <-ch:
+			switch event.Type {
+			case accountsevent.EventTypeAdded:
+				for _, address := range event.Accounts {
+					if _, exists := expectedAddresses[address]; !exists {
+						s.logger.Debug("missing address in the accounts event", zap.Any("address", address))
+						s.Fail("address not received in the event")
+					}
+				}
+			}
+		}
+	}
+	sub.Unsubscribe()
 }
 
 func (s *MessengerBackupSuite) TestBackupKeycards() {
@@ -811,8 +1012,12 @@ func (s *MessengerBackupSuite) TestBackupWatchOnlyAccounts() {
 	s.Require().True(haveSameElements(woAccounts, dbWoAccounts1, accounts.SameAccounts))
 
 	// Create bob2
-	bob2, err := newMessengerWithKey(s.shh, bob1.identity, s.logger, nil)
+	accountsFeed := &event.Feed{}
+	bob2, err := newMessengerWithKey(s.shh, bob1.identity, s.logger, []Option{WithAccountsFeed(accountsFeed)})
 	s.Require().NoError(err)
+	s.Require().NotNil(bob2.config.accountsFeed)
+	ch := make(chan accountsevent.Event, 20)
+	sub := bob2.config.accountsFeed.Subscribe(ch)
 	defer TearDownMessenger(&s.Suite, bob2)
 
 	// Backup
@@ -838,6 +1043,19 @@ func (s *MessengerBackupSuite) TestBackupWatchOnlyAccounts() {
 	s.Require().NoError(err)
 	s.Require().Equal(len(woAccounts), len(dbWoAccounts2))
 	s.Require().True(haveSameElements(woAccounts, dbWoAccounts2, accounts.SameAccounts))
+
+	// Check whether accounts added event is sent
+	select {
+	case <-time.After(1 * time.Second):
+		s.Fail("Timed out waiting for accountsevent")
+	case event := <-ch:
+		switch event.Type {
+		case accountsevent.EventTypeAdded:
+			s.Require().Len(event.Accounts, 1)
+			s.Require().Equal(common.Address(dbWoAccounts2[0].Address), event.Accounts[0])
+		}
+	}
+	sub.Unsubscribe()
 }
 
 func (s *MessengerBackupSuite) TestBackupChats() {

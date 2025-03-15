@@ -65,11 +65,10 @@ Session.vim
 .undodir/*
 /.idea/
 /.vscode/
+/tests-functional/.idea/
+/tests-functional/.vscode/
 /cmd/*/.ethereum/
 *.iml
-
-# created for running container
-_assets/compose/bootnode/keys
 
 # do not vendor nested vendor/ dirs
 vendor/**/vendor
@@ -92,6 +91,9 @@ vendor/github.com/waku-org/go-zerokit-rln-x86_64/
 vendor/github.com/waku-org/go-zerokit-rln-apple/
 vendor/github.com/waku-org/go-zerokit-rln-arm/
 
+# waku-go-bindings third_party directory
+vendor/**/waku-go-bindings/third_party/
+
 # status-cli logs
 alice.log
 bob.log
@@ -101,10 +103,34 @@ test-bob/
 # Nix
 /.nix-gcroots/
 
-# integration-tests
+# functional tests
 __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
 .envrc
 report/results.xml
+tests-functional/**/coverage
+tests-functional/reports
+tests-functional/signals
+tests-functional/*.log
+.venv
+
+
+# generated files
+mock
+mock.go
+*.pb.go
+bindata.go
+migrations.go
+cmd/status-backend/server/endpoints.go
+protocol/messenger_handlers.go
+internal/version/VERSION
+internal/version/GIT_COMMIT
+internal/sentry/SENTRY_CONTEXT_NAME
+internal/sentry/SENTRY_CONTEXT_VERSION
+internal/sentry/SENTRY_PRODUCTION
+
+# Don't ignore generated files in the vendor/ directory
+!vendor/**/*.pb.go
+!vendor/**/migrations.go

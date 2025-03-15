@@ -7,8 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
+	"github.com/status-im/status-go/rpc/chain"
+	"github.com/status-im/status-go/rpc/chain/ethclient"
+	"github.com/status-im/status-go/rpc/chain/rpclimiter"
+
 	"github.com/stretchr/testify/suite"
+	"go.uber.org/mock/gomock"
+
+	statusRpc "github.com/status-im/status-go/rpc"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -22,11 +28,12 @@ import (
 	"github.com/status-im/status-go/eth-node/crypto"
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/params"
-	"github.com/status-im/status-go/rpc"
 	wallet_common "github.com/status-im/status-go/services/wallet/common"
+	"github.com/status-im/status-go/services/wallet/wallettypes"
 	"github.com/status-im/status-go/sqlite"
 	"github.com/status-im/status-go/t/utils"
 	"github.com/status-im/status-go/transactions/fake"
+	mock_fake "github.com/status-im/status-go/transactions/fake"
 )
 
 func TestTransactorSuite(t *testing.T) {
@@ -39,7 +46,7 @@ type TransactorSuite struct {
 	server            *gethrpc.Server
 	client            *gethrpc.Client
 	txServiceMockCtrl *gomock.Controller
-	txServiceMock     *fake.MockPublicTransactionPoolAPI
+	txServiceMock     *mock_fake.MockPublicTransactionPoolAPI
 	nodeConfig        *params.NodeConfig
 
 	manager *Transactor
@@ -55,8 +62,24 @@ func (s *TransactorSuite) SetupTest() {
 	chainID := gethparams.AllEthashProtocolChanges.ChainID.Uint64()
 	db, err := sqlite.OpenUnecryptedDB(sqlite.InMemoryPath) // dummy to make rpc.Client happy
 	s.Require().NoError(err)
-	rpcClient, _ := rpc.NewClient(s.client, chainID, params.UpstreamRPCConfig{}, nil, db, nil)
+
+	config := statusRpc.ClientConfig{
+		Client:          s.client,
+		UpstreamChainID: chainID,
+		Networks:        nil,
+		DB:              db,
+		WalletFeed:      nil,
+	}
+	rpcClient, _ := statusRpc.NewClient(config)
+
 	rpcClient.UpstreamChainID = chainID
+
+	ethClients := []ethclient.RPSLimitedEthClientInterface{
+		ethclient.NewRPSLimitedEthClient(s.client, rpclimiter.NewRPCRpsLimiter(), "local-1-chain-id-1-circuit", "local-1-chain-id-1-provider"),
+	}
+	localClient := chain.NewClient(ethClients, chainID, nil)
+	rpcClient.SetClient(chainID, localClient)
+
 	nodeConfig, err := utils.MakeTestNodeConfigWithDataDir("", "/tmp", chainID)
 	s.Require().NoError(err)
 	s.nodeConfig = nodeConfig
@@ -79,7 +102,7 @@ var (
 	testNonce    = hexutil.Uint64(10)
 )
 
-func (s *TransactorSuite) setupTransactionPoolAPI(args SendTxArgs, returnNonce, resultNonce hexutil.Uint64, account *account.SelectedExtKey, txErr error) {
+func (s *TransactorSuite) setupTransactionPoolAPI(args wallettypes.SendTxArgs, returnNonce, resultNonce hexutil.Uint64, account *account.SelectedExtKey, txErr error) {
 	// Expect calls to gas functions only if there are no user defined values.
 	// And also set the expected gas and gas price for RLP encoding the expected tx.
 	var usedGas hexutil.Uint64
@@ -106,7 +129,7 @@ func (s *TransactorSuite) setupTransactionPoolAPI(args SendTxArgs, returnNonce, 
 	s.txServiceMock.EXPECT().SendRawTransaction(gomock.Any(), data).Return(common.Hash{}, txErr)
 }
 
-func (s *TransactorSuite) rlpEncodeTx(args SendTxArgs, config *params.NodeConfig, account *account.SelectedExtKey, nonce *hexutil.Uint64, gas hexutil.Uint64, gasPrice *big.Int) hexutil.Bytes {
+func (s *TransactorSuite) rlpEncodeTx(args wallettypes.SendTxArgs, config *params.NodeConfig, account *account.SelectedExtKey, nonce *hexutil.Uint64, gas hexutil.Uint64, gasPrice *big.Int) hexutil.Bytes {
 	var txData gethtypes.TxData
 	to := common.Address(*args.To)
 	if args.IsDynamicFeeTx() {
@@ -197,7 +220,7 @@ func (s *TransactorSuite) TestGasValues() {
 	for _, testCase := range testCases {
 		s.T().Run(testCase.name, func(t *testing.T) {
 			s.SetupTest()
-			args := SendTxArgs{
+			args := wallettypes.SendTxArgs{
 				From:                 account.FromAddress(utils.TestConfig.Account1.WalletAddress),
 				To:                   account.ToAddress(utils.TestConfig.Account2.WalletAddress),
 				Gas:                  testCase.gas,
@@ -214,7 +237,7 @@ func (s *TransactorSuite) TestGasValues() {
 	}
 }
 
-func (s *TransactorSuite) setupBuildTransactionMocks(args SendTxArgs, account *account.SelectedExtKey) {
+func (s *TransactorSuite) setupBuildTransactionMocks(args wallettypes.SendTxArgs, account *account.SelectedExtKey) {
 	s.txServiceMock.EXPECT().GetTransactionCount(gomock.Any(), gomock.Eq(common.Address(account.Address)), gethrpc.PendingBlockNumber).Return(&testNonce, nil)
 
 	if !args.IsDynamicFeeTx() && args.GasPrice == nil {
@@ -246,7 +269,7 @@ func (s *TransactorSuite) TestBuildAndValidateTransaction() {
 		s.SetupTest()
 
 		gas := hexutil.Uint64(21000)
-		args := SendTxArgs{
+		args := wallettypes.SendTxArgs{
 			From:                 fromAddress,
 			To:                   toAddress,
 			Gas:                  &gas,
@@ -266,7 +289,7 @@ func (s *TransactorSuite) TestBuildAndValidateTransaction() {
 
 	s.T().Run("DynamicFeeTransaction with gas estimation", func(t *testing.T) {
 		s.SetupTest()
-		args := SendTxArgs{
+		args := wallettypes.SendTxArgs{
 			From:                 fromAddress,
 			To:                   toAddress,
 			Value:                value,
@@ -289,7 +312,7 @@ func (s *TransactorSuite) TestBuildAndValidateTransaction() {
 
 		gas := hexutil.Uint64(21000)
 		gasPrice := (*hexutil.Big)(big.NewInt(10))
-		args := SendTxArgs{
+		args := wallettypes.SendTxArgs{
 			From:     fromAddress,
 			To:       toAddress,
 			Value:    value,
@@ -307,7 +330,7 @@ func (s *TransactorSuite) TestBuildAndValidateTransaction() {
 	s.T().Run("LegacyTransaction without gas estimation", func(t *testing.T) {
 		s.SetupTest()
 
-		args := SendTxArgs{
+		args := wallettypes.SendTxArgs{
 			From:  fromAddress,
 			To:    toAddress,
 			Value: value,
@@ -323,7 +346,7 @@ func (s *TransactorSuite) TestBuildAndValidateTransaction() {
 }
 
 func (s *TransactorSuite) TestArgsValidation() {
-	args := SendTxArgs{
+	args := wallettypes.SendTxArgs{
 		From:  account.FromAddress(utils.TestConfig.Account1.WalletAddress),
 		To:    account.ToAddress(utils.TestConfig.Account2.WalletAddress),
 		Data:  types.HexBytes([]byte{0x01, 0x02}),
@@ -334,11 +357,11 @@ func (s *TransactorSuite) TestArgsValidation() {
 		Address: account.FromAddress(utils.TestConfig.Account1.WalletAddress),
 	}
 	_, _, err := s.manager.SendTransaction(args, selectedAccount, -1)
-	s.EqualError(err, ErrInvalidSendTxArgs.Error())
+	s.EqualError(err, wallettypes.ErrInvalidSendTxArgs.Error())
 }
 
 func (s *TransactorSuite) TestAccountMismatch() {
-	args := SendTxArgs{
+	args := wallettypes.SendTxArgs{
 		From: account.FromAddress(utils.TestConfig.Account1.WalletAddress),
 		To:   account.ToAddress(utils.TestConfig.Account2.WalletAddress),
 	}
@@ -354,7 +377,7 @@ func (s *TransactorSuite) TestAccountMismatch() {
 		Address: account.FromAddress(utils.TestConfig.Account2.WalletAddress),
 	}
 	_, _, err = s.manager.SendTransaction(args, selectedAccount, -1)
-	s.EqualError(err, ErrInvalidTxSender.Error())
+	s.EqualError(err, wallettypes.ErrInvalidTxSender.Error())
 }
 
 func (s *TransactorSuite) TestSendTransactionWithSignature() {
@@ -392,7 +415,7 @@ func (s *TransactorSuite) TestSendTransactionWithSignature() {
 			gasPrice := (*hexutil.Big)(big.NewInt(2000000000))
 			data := []byte{}
 			chainID := big.NewInt(int64(s.nodeConfig.NetworkID))
-			args := SendTxArgs{
+			args := wallettypes.SendTxArgs{
 				From:     from,
 				To:       &to,
 				Gas:      &gas,
@@ -441,7 +464,7 @@ func (s *TransactorSuite) TestSendTransactionWithSignature() {
 }
 
 func (s *TransactorSuite) TestSendTransactionWithSignature_InvalidSignature() {
-	args := SendTxArgs{}
+	args := wallettypes.SendTxArgs{}
 	_, err := s.manager.BuildTransactionWithSignature(1, args, []byte{})
 	s.Equal(ErrInvalidSignatureSize, err)
 }
@@ -459,7 +482,7 @@ func (s *TransactorSuite) TestHashTransaction() {
 	gas := hexutil.Uint64(21000)
 	gasPrice := (*hexutil.Big)(big.NewInt(2000000000))
 
-	args := SendTxArgs{
+	args := wallettypes.SendTxArgs{
 		From:     from,
 		To:       &to,
 		Gas:      &gas,

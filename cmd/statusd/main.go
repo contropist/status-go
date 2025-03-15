@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,8 @@ import (
 
 	"github.com/status-im/status-go/api"
 	"github.com/status-im/status-go/appdatabase"
+	"github.com/status-im/status-go/cmd/status-backend/server"
+	"github.com/status-im/status-go/cmd/utils"
 	"github.com/status-im/status-go/common/dbsetup"
 	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
 	"github.com/status-im/status-go/eth-node/crypto"
@@ -59,10 +62,10 @@ var (
 	mailserver = flag.Bool("mailserver", false, "Enable Mail Server with default configuration")
 	networkID  = flag.Int(
 		"network-id",
-		params.GoerliNetworkID,
+		params.SepoliaNetworkID,
 		fmt.Sprintf(
-			"A network ID: %d (Mainnet), %d (Goerli)",
-			params.MainNetworkID, params.GoerliNetworkID,
+			"A network ID: %d (Mainnet), %d (Sepolia)",
+			params.MainNetworkID, params.SepoliaNetworkID,
 		),
 	)
 	fleet = flag.String(
@@ -81,6 +84,7 @@ var (
 		),
 	)
 	listenAddr = flag.String("addr", "", "address to bind listener to")
+	serverAddr = flag.String("server", "", "Address `host:port` for HTTP API server of statusd")
 
 	// don't change the name of this flag, https://github.com/ethereum/go-ethereum/blob/master/metrics/metrics.go#L41
 	metricsEnabled = flag.Bool("metrics", false, "Expose ethereum metrics with debug_metrics jsonrpc call")
@@ -98,8 +102,11 @@ func init() {
 
 // nolint:gocyclo
 func main() {
-	colors := terminal.IsTerminal(int(os.Stdin.Fd()))
-	if err := logutils.OverrideRootLog(true, "ERROR", logutils.FileOptions{}, colors); err != nil {
+	if err := logutils.OverrideRootLoggerWithConfig(logutils.LogSettings{
+		Enabled:   true,
+		Level:     "ERROR",
+		Colorized: terminal.IsTerminal(int(os.Stdin.Fd())),
+	}); err != nil {
 		stdlog.Fatalf("Error initializing logger: %v", err)
 	}
 
@@ -158,7 +165,7 @@ func main() {
 	}
 
 	// set up logging options
-	setupLogging(config)
+	utils.SetupLogging(logLevel, logWithoutColors, config)
 
 	// We want statusd to be distinct from StatusIM client.
 	config.Name = serverClientName
@@ -168,7 +175,24 @@ func main() {
 		return
 	}
 
-	backend := api.NewGethStatusBackend()
+	if serverAddr != nil && *serverAddr != "" {
+		srv := server.NewServer()
+		srv.Setup()
+		err = srv.Listen(*serverAddr)
+		if err != nil {
+			logger.Error("failed to start server", "error", err)
+			return
+		}
+		go srv.Serve()
+		log.Info("server started", "address", srv.Address())
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			srv.Stop(ctx)
+		}()
+	}
+
+	backend := api.NewGethStatusBackend(logutils.ZapLogger())
 	if config.NodeKey == "" {
 		logger.Error("node key needs to be set if running a push notification server")
 		return
@@ -232,15 +256,9 @@ func main() {
 			return
 		}
 
-		appDB, walletDB, err := openDatabases(config.DataDir + "/" + installationID.String())
-		if err != nil {
-			log.Error("failed to open databases")
-			return
-		}
-
 		options := []protocol.Option{
-			protocol.WithDatabase(appDB),
-			protocol.WithWalletDatabase(walletDB),
+			protocol.WithDatabase(backend.StatusNode().GetAppDB()),
+			protocol.WithWalletDatabase(backend.StatusNode().GetWalletDB()),
 			protocol.WithTorrentConfig(&config.TorrentConfig),
 			protocol.WithWalletConfig(&config.WalletConfig),
 			protocol.WithAccountManager(backend.AccountManager()),
@@ -249,7 +267,7 @@ func main() {
 		messenger, err := protocol.NewMessenger(
 			config.Name,
 			identity,
-			gethbridge.NewNodeBridge(backend.StatusNode().GethNode(), backend.StatusNode().WakuService(), backend.StatusNode().WakuV2Service()),
+			gethbridge.NewNodeBridge(backend.StatusNode().GethNode(), backend.StatusNode().WakuV2Service()),
 			installationID.String(),
 			nil,
 			config.Version,
@@ -296,12 +314,12 @@ func main() {
 		if *metricsEnabled || gethmetrics.Enabled {
 			go startCollectingNodeMetrics(interruptCh, backend.StatusNode())
 			go gethmetrics.CollectProcessMetrics(3 * time.Second)
-			go metrics.NewMetricsServer(*metricsPort, gethmetrics.DefaultRegistry).Listen()
+			go metrics.NewMetricsServer("localhost:"+strconv.Itoa(*metricsPort), gethmetrics.DefaultRegistry).Listen()
 		}
 
 		// Check if profiling shall be enabled.
 		if *pprofEnabled {
-			profiling.NewProfiler(*pprofPort).Go()
+			profiling.NewProfiler(fmt.Sprintf(":%d", *pprofPort)).Go()
 		}
 
 		if config.PushNotificationServerConfig.Enabled {
@@ -322,7 +340,7 @@ func main() {
 			messenger, err := protocol.NewMessenger(
 				config.Name,
 				identity,
-				gethbridge.NewNodeBridge(backend.StatusNode().GethNode(), backend.StatusNode().WakuService(), backend.StatusNode().WakuV2Service()),
+				gethbridge.NewNodeBridge(backend.StatusNode().GethNode(), backend.StatusNode().WakuV2Service()),
 				installationID.String(),
 				nil,
 				config.Version,
@@ -371,26 +389,6 @@ func getDefaultDataDir() string {
 		return filepath.Join(home, ".statusd")
 	}
 	return "./statusd-data"
-}
-
-func setupLogging(config *params.NodeConfig) {
-	if *logLevel != "" {
-		config.LogLevel = *logLevel
-	}
-
-	logSettings := logutils.LogSettings{
-		Enabled:         config.LogEnabled,
-		MobileSystem:    config.LogMobileSystem,
-		Level:           config.LogLevel,
-		File:            config.LogFile,
-		MaxSize:         config.LogMaxSize,
-		MaxBackups:      config.LogMaxBackups,
-		CompressRotated: config.LogCompressRotated,
-	}
-	colors := !(*logWithoutColors) && terminal.IsTerminal(int(os.Stdin.Fd()))
-	if err := logutils.OverrideRootLogWithConfig(logSettings, colors); err != nil {
-		stdlog.Fatalf("Error initializing logger: %v", err)
-	}
 }
 
 // loop for notifying systemd about process being alive

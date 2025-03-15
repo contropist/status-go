@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,14 +22,19 @@ type API struct {
 
 func NewAPI(s *Service) *API {
 	r := NewCommandRegistry()
-	c := commands.NewClientSideHandler()
+	c := commands.NewClientSideHandler(s.db)
 
 	// Transactions and signing
 	r.Register("eth_sendTransaction", &commands.SendTransactionCommand{
+		RpcClient:     s.rpc,
 		Db:            s.db,
 		ClientHandler: c,
 	})
-	r.Register("personal_sign", &commands.PersonalSignCommand{
+	r.Register("personal_sign", &commands.SignCommand{
+		Db:            s.db,
+		ClientHandler: c,
+	})
+	r.Register("eth_signTypedData_v4", &commands.SignCommand{
 		Db:            s.db,
 		ClientHandler: c,
 	})
@@ -65,7 +71,7 @@ func NewAPI(s *Service) *API {
 	}
 }
 
-func (api *API) forwardRPC(URL string, inputJSON string) (interface{}, error) {
+func (api *API) forwardRPC(URL string, request commands.RPCRequest) (interface{}, error) {
 	dApp, err := persistence.SelectDAppByUrl(api.s.db, URL)
 	if err != nil {
 		return "", err
@@ -75,8 +81,17 @@ func (api *API) forwardRPC(URL string, inputJSON string) (interface{}, error) {
 		return "", commands.ErrDAppIsNotPermittedByUser
 	}
 
+	if request.ChainID != dApp.ChainID {
+		request.ChainID = dApp.ChainID
+	}
+
 	var response map[string]interface{}
-	rawResponse := api.s.rpc.CallRaw(inputJSON)
+	byteRequest, err := json.Marshal(request)
+	if err != nil {
+		return "", err
+	}
+
+	rawResponse := api.s.rpc.CallRaw(string(byteRequest))
 	if err := json.Unmarshal([]byte(rawResponse), &response); err != nil {
 		return "", err
 	}
@@ -95,22 +110,22 @@ func (api *API) forwardRPC(URL string, inputJSON string) (interface{}, error) {
 	return nil, ErrInvalidResponseFromForwardedRpc
 }
 
-func (api *API) CallRPC(inputJSON string) (interface{}, error) {
+func (api *API) CallRPC(ctx context.Context, inputJSON string) (interface{}, error) {
 	request, err := commands.RPCRequestFromJSON(inputJSON)
 	if err != nil {
 		return "", err
 	}
 
 	if command, exists := api.r.GetCommand(request.Method); exists {
-		return command.Execute(request)
+		return command.Execute(ctx, request)
 	}
 
-	return api.forwardRPC(request.URL, inputJSON)
+	return api.forwardRPC(request.URL, request)
 }
 
 func (api *API) RecallDAppPermission(origin string) error {
 	// TODO: close the websocket connection
-	return persistence.DeleteDApp(api.s.db, origin)
+	return api.c.RecallDAppPermissions(commands.RecallDAppPermissionsArgs{URL: origin})
 }
 
 func (api *API) GetPermittedDAppsList() ([]persistence.DApp, error) {
@@ -133,10 +148,10 @@ func (api *API) SendTransactionRejected(args commands.RejectedArgs) error {
 	return api.c.SendTransactionRejected(args)
 }
 
-func (api *API) PersonalSignAccepted(args commands.PersonalSignAcceptedArgs) error {
-	return api.c.PersonalSignAccepted(args)
+func (api *API) SignAccepted(args commands.SignAcceptedArgs) error {
+	return api.c.SignAccepted(args)
 }
 
-func (api *API) PersonalSignRejected(args commands.RejectedArgs) error {
-	return api.c.PersonalSignRejected(args)
+func (api *API) SignRejected(args commands.RejectedArgs) error {
+	return api.c.SignRejected(args)
 }

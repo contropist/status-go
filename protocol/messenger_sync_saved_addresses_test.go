@@ -11,14 +11,13 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/ethereum/go-ethereum/common"
-	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
 	"github.com/status-im/status-go/eth-node/crypto"
-	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/multiaccounts/settings"
 	"github.com/status-im/status-go/protocol/encryption/multidevice"
 	"github.com/status-im/status-go/protocol/tt"
 	"github.com/status-im/status-go/services/wallet"
-	"github.com/status-im/status-go/waku"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 func TestMessengerSyncSavedAddressesSuite(t *testing.T) {
@@ -33,7 +32,7 @@ type MessengerSyncSavedAddressesSuite struct {
 
 	// If one wants to send messages between different instances of Messenger,
 	// a single Waku service should be shared.
-	shh types.Waku
+	shh wakutypes.Waku
 
 	logger *zap.Logger
 }
@@ -41,16 +40,14 @@ type MessengerSyncSavedAddressesSuite struct {
 func (s *MessengerSyncSavedAddressesSuite) SetupTest() {
 	s.logger = tt.MustCreateTestLogger()
 
-	config := waku.DefaultConfig
-	config.MinimumAcceptedPoW = 0
-	shh := waku.New(&config, s.logger)
-	s.shh = gethbridge.NewGethWakuWrapper(shh)
+	shh, err := newTestWakuNode(s.logger)
+	s.Require().NoError(err)
 	s.Require().NoError(shh.Start())
+	s.shh = shh
 
 	s.main = s.newMessenger(s.logger.Named("main"))
 	s.privateKey = s.main.identity
 
-	var err error
 	// Create new device and add main account to
 	s.other, err = newMessengerWithKey(s.shh, s.main.identity, s.logger.Named("other"), nil)
 	s.Require().NoError(err)
@@ -62,7 +59,7 @@ func (s *MessengerSyncSavedAddressesSuite) SetupTest() {
 	}
 	err = s.other.SetInstallationMetadata(s.other.installationID, imOther)
 	s.Require().NoError(err)
-	response, err := s.other.SendPairInstallation(context.Background(), nil)
+	response, err := s.other.SendPairInstallation(context.Background(), "", nil)
 	s.Require().NoError(err)
 	s.Require().NotNil(response)
 
@@ -74,7 +71,7 @@ func (s *MessengerSyncSavedAddressesSuite) SetupTest() {
 	)
 	s.Require().NoError(err)
 
-	err = s.main.EnableInstallation(s.other.installationID)
+	_, err = s.main.EnableInstallation(s.other.installationID)
 	s.Require().NoError(err)
 }
 

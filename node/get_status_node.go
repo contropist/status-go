@@ -1,6 +1,7 @@
 package node
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -11,10 +12,10 @@ import (
 	"sync"
 
 	"github.com/syndtr/goleveldb/leveldb"
+	"go.uber.org/zap"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/event"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/p2p/enode"
@@ -32,12 +33,14 @@ import (
 	"github.com/status-im/status-go/rpc"
 	"github.com/status-im/status-go/server"
 	accountssvc "github.com/status-im/status-go/services/accounts"
+	appgeneral "github.com/status-im/status-go/services/app-general"
 	appmetricsservice "github.com/status-im/status-go/services/appmetrics"
 	"github.com/status-im/status-go/services/browsers"
 	"github.com/status-im/status-go/services/chat"
 	"github.com/status-im/status-go/services/communitytokens"
 	"github.com/status-im/status-go/services/connector"
 	"github.com/status-im/status-go/services/ens"
+	"github.com/status-im/status-go/services/eth"
 	"github.com/status-im/status-go/services/gif"
 	localnotifications "github.com/status-im/status-go/services/local-notifications"
 	"github.com/status-im/status-go/services/mailservers"
@@ -50,13 +53,11 @@ import (
 	"github.com/status-im/status-go/services/stickers"
 	"github.com/status-im/status-go/services/subscriptions"
 	"github.com/status-im/status-go/services/updates"
-	"github.com/status-im/status-go/services/wakuext"
 	"github.com/status-im/status-go/services/wakuv2ext"
 	"github.com/status-im/status-go/services/wallet"
 	"github.com/status-im/status-go/services/web3provider"
 	"github.com/status-im/status-go/timesource"
 	"github.com/status-im/status-go/transactions"
-	"github.com/status-im/status-go/waku"
 	"github.com/status-im/status-go/wakuv2"
 )
 
@@ -85,14 +86,16 @@ type StatusNode struct {
 	rpcClient *rpc.Client        // reference to an RPC client
 
 	downloader *ipfs.Downloader
-	httpServer *server.MediaServer
+
+	mediaServerEnableTLS *bool
+	httpServer           *server.MediaServer
 
 	discovery discovery.Discovery
 	register  *peers.Register
 	peerPool  *peers.PeerPool
 	db        *leveldb.DB // used as a cache for PeerPool
 
-	log log.Logger
+	logger *zap.Logger
 
 	gethAccountManager *account.GethManager
 	accountsManager    *accounts.Manager
@@ -118,8 +121,6 @@ type StatusNode struct {
 	localNotificationsSrvc *localnotifications.Service
 	personalSrvc           *personal.Service
 	timeSourceSrvc         *timesource.NTPTimeSource
-	wakuSrvc               *waku.Waku
-	wakuExtSrvc            *wakuext.Service
 	wakuV2Srvc             *wakuv2.Waku
 	wakuV2ExtSrvc          *wakuv2ext.Service
 	ensSrvc                *ens.Service
@@ -130,16 +131,22 @@ type StatusNode struct {
 	updatesSrvc            *updates.Service
 	pendingTracker         *transactions.PendingTxTracker
 	connectorSrvc          *connector.Service
+	appGeneralSrvc         *appgeneral.Service
+	ethSrvc                *eth.Service
 
-	walletFeed event.Feed
+	accountsFeed event.Feed
+	walletFeed   event.Feed
+	networksFeed event.Feed
+	settingsFeed event.Feed
 }
 
 // New makes new instance of StatusNode.
-func New(transactor *transactions.Transactor) *StatusNode {
+func New(transactor *transactions.Transactor, logger *zap.Logger) *StatusNode {
+	logger = logger.Named("StatusNode")
 	return &StatusNode{
-		gethAccountManager: account.NewGethManager(),
+		gethAccountManager: account.NewGethManager(logger),
 		transactor:         transactor,
-		log:                log.New("package", "status-go/node.StatusNode"),
+		logger:             logger,
 		publicMethods:      make(map[string]bool),
 	}
 }
@@ -198,7 +205,7 @@ type StartOptions struct {
 // The server can only handle requests that don't require appdb or IPFS downloader
 func (n *StatusNode) StartMediaServerWithoutDB() error {
 	if n.isRunning() {
-		n.log.Debug("node is already running, no need to StartMediaServerWithoutDB")
+		n.logger.Debug("node is already running, no need to StartMediaServerWithoutDB")
 		return nil
 	}
 
@@ -208,7 +215,11 @@ func (n *StatusNode) StartMediaServerWithoutDB() error {
 		}
 	}
 
-	httpServer, err := server.NewMediaServer(nil, nil, n.multiaccountsDB, nil)
+	var opts []server.MediaServerOption
+	if n.mediaServerEnableTLS != nil {
+		opts = append(opts, server.WithMediaServerDisableTLS(!*n.mediaServerEnableTLS))
+	}
+	httpServer, err := server.NewMediaServer(nil, nil, n.multiaccountsDB, nil, opts...)
 	if err != nil {
 		return err
 	}
@@ -229,13 +240,13 @@ func (n *StatusNode) StartWithOptions(config *params.NodeConfig, options StartOp
 	defer n.mu.Unlock()
 
 	if n.isRunning() {
-		n.log.Debug("node is already running")
+		n.logger.Debug("node is already running")
 		return ErrNodeRunning
 	}
 
 	n.accountsManager = options.AccountsManager
 
-	n.log.Debug("starting with options", "ClusterConfig", config.ClusterConfig)
+	n.logger.Debug("starting with options", zap.Stringer("ClusterConfig", &config.ClusterConfig))
 
 	db, err := db.Create(config.DataDir, params.StatusDatabase)
 	if err != nil {
@@ -253,13 +264,17 @@ func (n *StatusNode) StartWithOptions(config *params.NodeConfig, options StartOp
 
 	if err != nil {
 		if dberr := db.Close(); dberr != nil {
-			n.log.Error("error while closing leveldb after node crash", "error", dberr)
+			n.logger.Error("error while closing leveldb after node crash", zap.Error(dberr))
 		}
 		n.db = nil
 		return err
 	}
 
 	return nil
+}
+
+func (n *StatusNode) SetMediaServerEnableTLS(enableTLS *bool) {
+	n.mediaServerEnableTLS = enableTLS
 }
 
 func (n *StatusNode) startWithDB(config *params.NodeConfig, accs *accounts.Manager, db *leveldb.DB) error {
@@ -280,7 +295,12 @@ func (n *StatusNode) startWithDB(config *params.NodeConfig, accs *accounts.Manag
 		}
 	}
 
-	httpServer, err := server.NewMediaServer(n.appDB, n.downloader, n.multiaccountsDB, n.walletDB)
+	var opts []server.MediaServerOption
+	if n.mediaServerEnableTLS != nil {
+		opts = append(opts, server.WithMediaServerDisableTLS(!*n.mediaServerEnableTLS))
+	}
+
+	httpServer, err := server.NewMediaServer(n.appDB, n.downloader, n.multiaccountsDB, n.walletDB, opts...)
 	if err != nil {
 		return err
 	}
@@ -314,23 +334,21 @@ func (n *StatusNode) setupRPCClient() (err error) {
 		return
 	}
 
-	// ProviderConfigs should be passed not in wallet secrets config on login
-	// but some other way, as it's not wallet specific and should not be passed with login request
-	// but currently there is no other way to pass it
-	providerConfigs := []params.ProviderConfig{
-		{
-			Enabled:  n.config.WalletConfig.StatusProxyEnabled,
-			Name:     rpc.ProviderStatusProxy,
-			User:     n.config.WalletConfig.StatusProxyBlockchainUser,
-			Password: n.config.WalletConfig.StatusProxyBlockchainPassword,
-		},
+	config := rpc.ClientConfig{
+		Client:          gethNodeClient,
+		UpstreamChainID: n.config.NetworkID,
+		Networks:        n.config.Networks,
+		DB:              n.appDB,
+		AccountsFeed:    &n.accountsFeed,
+		WalletFeed:      &n.walletFeed,
+		SettingsFeed:    &n.settingsFeed,
+		NetworksFeed:    &n.networksFeed,
 	}
-
-	n.rpcClient, err = rpc.NewClient(gethNodeClient, n.config.NetworkID, n.config.UpstreamConfig, n.config.Networks, n.appDB, providerConfigs)
+	n.rpcClient, err = rpc.NewClient(config)
 	if err != nil {
 		return
 	}
-
+	n.rpcClient.Start(context.Background())
 	return
 }
 
@@ -350,7 +368,7 @@ func (n *StatusNode) discoverNode() (*enode.Node, error) {
 		return discNode, nil
 	}
 
-	n.log.Info("Using AdvertiseAddr for rendezvous", "addr", n.config.AdvertiseAddr)
+	n.logger.Info("Using AdvertiseAddr for rendezvous", zap.String("addr", n.config.AdvertiseAddr))
 
 	r := discNode.Record()
 	r.Set(enr.IP(net.ParseIP(n.config.AdvertiseAddr)))
@@ -392,11 +410,10 @@ func (n *StatusNode) startDiscovery() error {
 	} else {
 		n.discovery = discoveries[0]
 	}
-	log.Debug(
-		"using discovery",
-		"instance", reflect.TypeOf(n.discovery),
-		"registerTopics", n.config.RegisterTopics,
-		"requireTopics", n.config.RequireTopics,
+	n.logger.Debug("using discovery",
+		zap.Any("instance", reflect.TypeOf(n.discovery)),
+		zap.Any("registerTopics", n.config.RegisterTopics),
+		zap.Any("requireTopics", n.config.RequireTopics),
 	)
 	n.register = peers.NewRegister(n.discovery, n.config.RegisterTopics...)
 	options := peers.NewDefaultOptions()
@@ -435,7 +452,7 @@ func (n *StatusNode) Stop() error {
 func (n *StatusNode) stop() error {
 	if n.isDiscoveryRunning() {
 		if err := n.stopDiscovery(); err != nil {
-			n.log.Error("Error stopping the discovery components", "error", err)
+			n.logger.Error("Error stopping the discovery components", zap.Error(err))
 		}
 		n.register = nil
 		n.peerPool = nil
@@ -446,6 +463,7 @@ func (n *StatusNode) stop() error {
 		return err
 	}
 
+	n.rpcClient.Stop()
 	n.rpcClient = nil
 	// We need to clear `gethNode` because config is passed to `Start()`
 	// and may be completely different. Similarly with `config`.
@@ -463,7 +481,7 @@ func (n *StatusNode) stop() error {
 
 	if n.db != nil {
 		if err = n.db.Close(); err != nil {
-			n.log.Error("Error closing the leveldb of status node", "error", err)
+			n.logger.Error("Error closing the leveldb of status node", zap.Error(err))
 			return err
 		}
 		n.db = nil
@@ -483,8 +501,6 @@ func (n *StatusNode) stop() error {
 	n.localNotificationsSrvc = nil
 	n.personalSrvc = nil
 	n.timeSourceSrvc = nil
-	n.wakuSrvc = nil
-	n.wakuExtSrvc = nil
 	n.wakuV2Srvc = nil
 	n.wakuV2ExtSrvc = nil
 	n.ensSrvc = nil
@@ -493,7 +509,8 @@ func (n *StatusNode) stop() error {
 	n.connectorSrvc = nil
 	n.publicMethods = make(map[string]bool)
 	n.pendingTracker = nil
-	n.log.Debug("status node stopped")
+	n.appGeneralSrvc = nil
+	n.logger.Debug("status node stopped")
 	return nil
 }
 
@@ -522,7 +539,7 @@ func (n *StatusNode) ResetChainData(config *params.NodeConfig) error {
 	}
 	err := os.RemoveAll(chainDataDir)
 	if err == nil {
-		n.log.Info("Chain data has been removed", "dir", chainDataDir)
+		n.logger.Info("Chain data has been removed", zap.String("dir", chainDataDir))
 	}
 	return err
 }
@@ -542,16 +559,16 @@ func (n *StatusNode) isRunning() bool {
 // populateStaticPeers connects current node with our publicly available LES/SHH/Swarm cluster
 func (n *StatusNode) populateStaticPeers() error {
 	if !n.config.ClusterConfig.Enabled {
-		n.log.Info("Static peers are disabled")
+		n.logger.Info("Static peers are disabled")
 		return nil
 	}
 
 	for _, enode := range n.config.ClusterConfig.StaticNodes {
 		if err := n.addPeer(enode); err != nil {
-			n.log.Error("Static peer addition failed", "error", err)
+			n.logger.Error("Static peer addition failed", zap.Error(err))
 			return err
 		}
-		n.log.Info("Static peer added", "enode", enode)
+		n.logger.Info("Static peer added", zap.String("enode", enode))
 	}
 
 	return nil
@@ -559,16 +576,16 @@ func (n *StatusNode) populateStaticPeers() error {
 
 func (n *StatusNode) removeStaticPeers() error {
 	if !n.config.ClusterConfig.Enabled {
-		n.log.Info("Static peers are disabled")
+		n.logger.Info("Static peers are disabled")
 		return nil
 	}
 
 	for _, enode := range n.config.ClusterConfig.StaticNodes {
 		if err := n.removePeer(enode); err != nil {
-			n.log.Error("Static peer deletion failed", "error", err)
+			n.logger.Error("Static peer deletion failed", zap.Error(err))
 			return err
 		}
-		n.log.Info("Static peer deleted", "enode", enode)
+		n.logger.Info("Static peer deleted", zap.String("enode", enode))
 	}
 	return nil
 }
@@ -641,10 +658,6 @@ func (n *StatusNode) PeerCount() int {
 }
 
 func (n *StatusNode) ConnectionChanged(state connection.State) {
-	if n.wakuExtSrvc != nil {
-		n.wakuExtSrvc.ConnectionChanged(state)
-	}
-
 	if n.wakuV2ExtSrvc != nil {
 		n.wakuV2ExtSrvc.ConnectionChanged(state)
 	}
@@ -684,10 +697,18 @@ func (n *StatusNode) SetAppDB(db *sql.DB) {
 	n.appDB = db
 }
 
+func (n *StatusNode) GetAppDB() *sql.DB {
+	return n.appDB
+}
+
 func (n *StatusNode) SetMultiaccountsDB(db *multiaccounts.Database) {
 	n.multiaccountsDB = db
 }
 
 func (n *StatusNode) SetWalletDB(db *sql.DB) {
 	n.walletDB = db
+}
+
+func (n *StatusNode) GetWalletDB() *sql.DB {
+	return n.walletDB
 }

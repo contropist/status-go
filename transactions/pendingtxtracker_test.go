@@ -9,15 +9,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 
 	eth "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/rpc"
-	"github.com/status-im/status-go/rpc/chain"
+	"github.com/status-im/status-go/rpc/chain/ethclient"
 	mock_rpcclient "github.com/status-im/status-go/rpc/mock/client"
 
 	"github.com/status-im/status-go/services/wallet/common"
@@ -43,7 +43,7 @@ func setupTestTransactionDB(t *testing.T, checkInterval *time.Duration) (*Pendin
 	rpcClient.EXPECT().EthClient(common.EthereumMainnet).Return(chainClient, nil).AnyTimes()
 
 	// Delegate the call to the fake implementation
-	rpcClient.EXPECT().AbstractEthClient(gomock.Any()).DoAndReturn(func(chainID common.ChainID) (chain.BatchCallClient, error) {
+	rpcClient.EXPECT().AbstractEthClient(gomock.Any()).DoAndReturn(func(chainID common.ChainID) (ethclient.BatchCallClient, error) {
 		return chainClient.AbstractEthClient(chainID)
 	}).AnyTimes()
 	return NewPendingTxTracker(db, rpcClient, nil, eventFeed, pendingCheckInterval), func() {
@@ -173,7 +173,7 @@ func TestPendingTxTracker_InterruptWatching(t *testing.T) {
 	sub := eventFeed.Subscribe(eventChan)
 
 	for i := range txs {
-		err := m.addPending(&txs[i])
+		err := m.addPendingAndNotify(&txs[i])
 		require.NoError(t, err)
 	}
 
@@ -563,7 +563,7 @@ func TestPendingTransactions(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, rst)
 
-	err = manager.addPending(&tx)
+	err = manager.addPendingAndNotify(&tx)
 	require.NoError(t, err)
 
 	rst, err = manager.GetPendingByAddress([]uint64{777}, tx.From)

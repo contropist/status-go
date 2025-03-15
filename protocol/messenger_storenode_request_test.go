@@ -19,12 +19,10 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/status-im/status-go/appdatabase"
-	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/multiaccounts/accounts"
 	"github.com/status-im/status-go/params"
 	"github.com/status-im/status-go/protocol/common"
-	"github.com/status-im/status-go/protocol/common/shard"
 	"github.com/status-im/status-go/protocol/communities"
 	"github.com/status-im/status-go/protocol/communities/token"
 	"github.com/status-im/status-go/protocol/protobuf"
@@ -34,8 +32,11 @@ import (
 	mailserversDB "github.com/status-im/status-go/services/mailservers"
 	"github.com/status-im/status-go/services/wallet/bigint"
 	"github.com/status-im/status-go/t/helpers"
+	"github.com/status-im/status-go/wakuv2"
 	waku2 "github.com/status-im/status-go/wakuv2"
 	wakuV2common "github.com/status-im/status-go/wakuv2/common"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 const (
@@ -61,8 +62,8 @@ type MessengerStoreNodeRequestSuite struct {
 	wakuStoreNode    *waku2.Waku
 	storeNodeAddress multiaddr.Multiaddr
 
-	ownerWaku types.Waku
-	bobWaku   types.Waku
+	ownerWaku wakutypes.Waku
+	bobWaku   wakutypes.Waku
 
 	collectiblesServiceMock *CollectiblesServiceMock
 
@@ -160,7 +161,7 @@ func (s *MessengerStoreNodeRequestSuite) createStore() {
 	cfg := testWakuV2Config{
 		logger:      s.logger.Named("store-waku"),
 		enableStore: true,
-		clusterID:   shard.MainStatusShardCluster,
+		clusterID:   wakuv2.MainStatusShardCluster,
 	}
 
 	s.wakuStoreNode = NewTestWakuV2(&s.Suite, cfg)
@@ -169,8 +170,8 @@ func (s *MessengerStoreNodeRequestSuite) createStore() {
 }
 
 func (s *MessengerStoreNodeRequestSuite) tearDownOwner() {
-	_ = gethbridge.GetGethWakuV2From(s.ownerWaku).Stop()
 	TearDownMessenger(&s.Suite, s.owner)
+	_ = s.ownerWaku.Stop()
 }
 
 func (s *MessengerStoreNodeRequestSuite) createOwner() {
@@ -178,17 +179,16 @@ func (s *MessengerStoreNodeRequestSuite) createOwner() {
 	cfg := testWakuV2Config{
 		logger:      s.logger.Named("owner-waku"),
 		enableStore: false,
-		clusterID:   shard.MainStatusShardCluster,
+		clusterID:   wakuv2.MainStatusShardCluster,
 	}
 
-	wakuV2 := NewTestWakuV2(&s.Suite, cfg)
-	s.ownerWaku = gethbridge.NewGethWakuV2Wrapper(wakuV2)
+	s.ownerWaku = NewTestWakuV2(&s.Suite, cfg)
 
 	messengerLogger := s.logger.Named("owner-messenger")
 	s.owner = s.newMessenger(s.ownerWaku, messengerLogger, &s.storeNodeAddress)
 
 	// We force the owner to use the store node as relay peer
-	WaitForPeersConnected(&s.Suite, gethbridge.GetGethWakuV2From(s.ownerWaku), func() peer.IDSlice {
+	WaitForPeersConnected(&s.Suite, s.ownerWaku, func() peer.IDSlice {
 		err := s.owner.DialPeer(s.storeNodeAddress)
 		s.Require().NoError(err)
 		return peer.IDSlice{s.wakuStoreNode.PeerID()}
@@ -199,21 +199,20 @@ func (s *MessengerStoreNodeRequestSuite) createBob() {
 	cfg := testWakuV2Config{
 		logger:      s.logger.Named("bob-waku"),
 		enableStore: false,
-		clusterID:   shard.MainStatusShardCluster,
+		clusterID:   wakuv2.MainStatusShardCluster,
 	}
-	wakuV2 := NewTestWakuV2(&s.Suite, cfg)
-	s.bobWaku = gethbridge.NewGethWakuV2Wrapper(wakuV2)
+	s.bobWaku = NewTestWakuV2(&s.Suite, cfg)
 
 	messengerLogger := s.logger.Named("bob-messenger")
 	s.bob = s.newMessenger(s.bobWaku, messengerLogger, &s.storeNodeAddress)
 }
 
 func (s *MessengerStoreNodeRequestSuite) tearDownBob() {
-	_ = gethbridge.GetGethWakuV2From(s.bobWaku).Stop()
 	TearDownMessenger(&s.Suite, s.bob)
+	_ = s.bobWaku.Stop()
 }
 
-func (s *MessengerStoreNodeRequestSuite) newMessenger(shh types.Waku, logger *zap.Logger, mailserverAddress *multiaddr.Multiaddr) *Messenger {
+func (s *MessengerStoreNodeRequestSuite) newMessenger(shh wakutypes.Waku, logger *zap.Logger, mailserverAddress *multiaddr.Multiaddr) *Messenger {
 	privateKey, err := crypto.GenerateKey()
 	s.Require().NoError(err)
 
@@ -235,7 +234,7 @@ func (s *MessengerStoreNodeRequestSuite) newMessenger(shh types.Waku, logger *za
 }
 
 func (s *MessengerStoreNodeRequestSuite) createCommunity(m *Messenger) *communities.Community {
-	s.waitForAvailableStoreNode(m)
+	s.WaitForAvailableStoreNode(m)
 
 	storeNodeSubscription := s.setupStoreNodeEnvelopesWatcher(nil)
 
@@ -290,7 +289,7 @@ func (s *MessengerStoreNodeRequestSuite) fetchCommunity(m *Messenger, communityS
 		WithWaitForResponseOption(true),
 	}
 
-	fetchedCommunity, stats, err := m.storeNodeRequestsManager.FetchCommunity(communityShard, options)
+	fetchedCommunity, stats, err := m.storeNodeRequestsManager.FetchCommunity(context.TODO(), communityShard, options)
 
 	s.Require().NoError(err)
 	s.requireCommunitiesEqual(fetchedCommunity, expectedCommunity)
@@ -309,12 +308,14 @@ func (s *MessengerStoreNodeRequestSuite) fetchProfile(m *Messenger, contactID st
 	}
 }
 
-func (s *MessengerStoreNodeRequestSuite) waitForAvailableStoreNode(messenger *Messenger) {
-	WaitForAvailableStoreNode(&s.Suite, messenger, storeNodeConnectTimeout)
+func (s *MessengerStoreNodeRequestSuite) WaitForAvailableStoreNode(messenger *Messenger) {
+	ctx, cancel := context.WithTimeout(context.TODO(), storeNodeConnectTimeout)
+	defer cancel()
+	WaitForAvailableStoreNode(&s.Suite, messenger, ctx)
 }
 
-func (s *MessengerStoreNodeRequestSuite) setupEnvelopesWatcher(wakuNode *waku2.Waku, topic *wakuV2common.TopicType, cb func(envelope *wakuV2common.ReceivedMessage)) {
-	envelopesWatcher := make(chan wakuV2common.EnvelopeEvent, 100)
+func (s *MessengerStoreNodeRequestSuite) setupEnvelopesWatcher(wakuNode wakutypes.Waku, topic *wakutypes.TopicType, cb func(envelope *wakuV2common.ReceivedMessage)) {
+	envelopesWatcher := make(chan wakutypes.EnvelopeEvent, 100)
 	envelopesSub := wakuNode.SubscribeEnvelopeEvents(envelopesWatcher)
 
 	go func() {
@@ -325,13 +326,13 @@ func (s *MessengerStoreNodeRequestSuite) setupEnvelopesWatcher(wakuNode *waku2.W
 				return
 
 			case envelopeEvent := <-envelopesWatcher:
-				if envelopeEvent.Event != wakuV2common.EventEnvelopeAvailable {
+				if envelopeEvent.Event != wakutypes.EventEnvelopeAvailable {
 					continue
 				}
 				if topic != nil && *topic != envelopeEvent.Topic {
 					continue
 				}
-				envelope := wakuNode.GetEnvelope(envelopeEvent.Hash)
+				envelope := wakuNode.(*waku2.Waku).GetEnvelope(envelopeEvent.Hash)
 				cb(envelope)
 				s.logger.Debug("envelope available event for fetched content topic",
 					zap.Any("envelopeEvent", envelopeEvent),
@@ -343,7 +344,7 @@ func (s *MessengerStoreNodeRequestSuite) setupEnvelopesWatcher(wakuNode *waku2.W
 	}()
 }
 
-func (s *MessengerStoreNodeRequestSuite) setupStoreNodeEnvelopesWatcher(topic *wakuV2common.TopicType) <-chan string {
+func (s *MessengerStoreNodeRequestSuite) setupStoreNodeEnvelopesWatcher(topic *wakutypes.TopicType) <-chan string {
 	storeNodeSubscription := make(chan string, 100)
 	s.setupEnvelopesWatcher(s.wakuStoreNode, topic, func(envelope *wakuV2common.ReceivedMessage) {
 		storeNodeSubscription <- envelope.Hash().String()
@@ -366,12 +367,13 @@ func (s *MessengerStoreNodeRequestSuite) waitForEnvelopes(subscription <-chan st
 }
 
 func (s *MessengerStoreNodeRequestSuite) wakuListenAddress(waku *waku2.Waku) multiaddr.Multiaddr {
-	addresses := waku.ListenAddresses()
+	addresses, err := waku.ListenAddresses()
+	s.Require().NoError(err)
 	s.Require().LessOrEqual(1, len(addresses))
 	return addresses[0]
 }
 
-func (s *MessengerStoreNodeRequestSuite) ensureStoreNodeEnvelopes(contentTopic *wakuV2common.TopicType, minimumCount int) {
+func (s *MessengerStoreNodeRequestSuite) ensureStoreNodeEnvelopes(contentTopic *wakutypes.TopicType, minimumCount int) {
 	// Give some time for store node to put envelope into database. Otherwise, the test is flaky.
 	// Although we subscribed to EnvelopeEvents and waited, the actual saving to database happens asynchronously.
 	// It would be nice to implement a subscription for database storing event, but it isn't worth it right now.
@@ -419,11 +421,11 @@ func (s *MessengerStoreNodeRequestSuite) TestSimultaneousCommunityInfoRequests()
 	community := s.createCommunity(s.owner)
 
 	storeNodeRequestsCount := 0
-	s.bob.storeNodeRequestsManager.onPerformingBatch = func(batch MailserverBatch) {
+	s.bob.storeNodeRequestsManager.onPerformingBatch = func(batch wakutypes.MailserverBatch) {
 		storeNodeRequestsCount++
 	}
 
-	s.waitForAvailableStoreNode(s.bob)
+	s.WaitForAvailableStoreNode(s.bob)
 
 	wg := sync.WaitGroup{}
 
@@ -453,7 +455,7 @@ func (s *MessengerStoreNodeRequestSuite) TestRequestNonExistentCommunity() {
 
 	s.createBob()
 
-	s.waitForAvailableStoreNode(s.bob)
+	s.WaitForAvailableStoreNode(s.bob)
 	fetchedCommunity, err := s.bob.FetchCommunity(&request)
 
 	s.Require().NoError(err)
@@ -478,7 +480,7 @@ func (s *MessengerStoreNodeRequestSuite) TestRequestCommunityPagingAlgorithm() {
 
 	// Create a community
 	community := s.createCommunity(s.owner)
-	contentTopic := wakuV2common.BytesToTopic(transport.ToTopic(community.IDString()))
+	contentTopic := wakutypes.BytesToTopic(transport.ToTopic(community.IDString()))
 	storeNodeSubscription := s.setupStoreNodeEnvelopesWatcher(&contentTopic)
 
 	// Push spam to the same ContentTopic & PubsubTopic
@@ -617,7 +619,7 @@ func (s *MessengerStoreNodeRequestSuite) TestRequestProfileInfo() {
 	s.Require().NoError(err)
 
 	contentTopicString := transport.ContactCodeTopic(&s.owner.identity.PublicKey)
-	contentTopic := wakuV2common.BytesToTopic(transport.ToTopic(contentTopicString))
+	contentTopic := wakutypes.BytesToTopic(transport.ToTopic(contentTopicString))
 	storeNodeSubscription := s.setupStoreNodeEnvelopesWatcher(&contentTopic)
 
 	// Set display name, this will also publish contact code
@@ -658,7 +660,7 @@ func (s *MessengerStoreNodeRequestSuite) TestSequentialUpdates() {
 	community := s.createCommunity(s.owner)
 	s.fetchCommunity(s.bob, community.CommunityShard(), community)
 
-	contentTopic := wakuV2common.BytesToTopic(transport.ToTopic(community.IDString()))
+	contentTopic := wakutypes.BytesToTopic(transport.ToTopic(community.IDString()))
 	communityName := community.Name()
 
 	storeNodeSubscription := s.setupStoreNodeEnvelopesWatcher(&contentTopic)
@@ -696,8 +698,8 @@ func (s *MessengerStoreNodeRequestSuite) TestRequestShardAndCommunityInfo() {
 	topicPrivKey, err := crypto.GenerateKey()
 	s.Require().NoError(err)
 
-	expectedShard := &shard.Shard{
-		Cluster: shard.MainStatusShardCluster,
+	expectedShard := &wakuv2.Shard{
+		Cluster: wakuv2.MainStatusShardCluster,
 		Index:   23,
 	}
 
@@ -714,7 +716,7 @@ func (s *MessengerStoreNodeRequestSuite) TestRequestShardAndCommunityInfo() {
 	}
 
 	shardTopic := transport.CommunityShardInfoTopic(community.IDString())
-	contentContentTopic := wakuV2common.BytesToTopic(transport.ToTopic(shardTopic))
+	contentContentTopic := wakutypes.BytesToTopic(transport.ToTopic(shardTopic))
 	storeNodeSubscription := s.setupStoreNodeEnvelopesWatcher(&contentContentTopic)
 
 	_, err = s.owner.SetCommunityShard(shardRequest)
@@ -722,7 +724,7 @@ func (s *MessengerStoreNodeRequestSuite) TestRequestShardAndCommunityInfo() {
 
 	s.waitForEnvelopes(storeNodeSubscription, 1)
 
-	s.waitForAvailableStoreNode(s.bob)
+	s.WaitForAvailableStoreNode(s.bob)
 
 	communityShard := community.CommunityShard()
 
@@ -776,7 +778,7 @@ func (s *MessengerStoreNodeRequestSuite) TestRequestCommunityEnvelopesOrder() {
 
 	const descriptionsCount = 4
 	community := s.createCommunity(s.owner)
-	contentTopic := wakuV2common.BytesToTopic(transport.ToTopic(community.IDString()))
+	contentTopic := wakutypes.BytesToTopic(transport.ToTopic(community.IDString()))
 	storeNodeSubscription := s.setupStoreNodeEnvelopesWatcher(&contentTopic)
 
 	// Push a few descriptions to the store node
@@ -789,7 +791,7 @@ func (s *MessengerStoreNodeRequestSuite) TestRequestCommunityEnvelopesOrder() {
 	s.waitForEnvelopes(storeNodeSubscription, descriptionsCount-1)
 
 	// Subscribe to received envelope
-	bobWakuV2 := gethbridge.GetGethWakuV2From(s.bobWaku)
+	bobWakuV2 := s.bobWaku.(*waku2.Waku)
 
 	var receivedEnvelopes []*wakuV2common.ReceivedMessage
 	s.setupEnvelopesWatcher(bobWakuV2, &contentTopic, func(envelope *wakuV2common.ReceivedMessage) {
@@ -806,7 +808,7 @@ func (s *MessengerStoreNodeRequestSuite) TestRequestCommunityEnvelopesOrder() {
 	}
 
 	// Fetch the community
-	fetchedCommunity, _, err := s.bob.storeNodeRequestsManager.FetchCommunity(community.CommunityShard(), options)
+	fetchedCommunity, _, err := s.bob.storeNodeRequestsManager.FetchCommunity(context.TODO(), community.CommunityShard(), options)
 	s.Require().NoError(err)
 	s.requireCommunitiesEqual(fetchedCommunity, community)
 
@@ -841,8 +843,8 @@ type testFetchRealCommunityExampleTokenInfo struct {
 
 var testFetchRealCommunityExample = []struct {
 	CommunityID          string
-	CommunityURL         string       // If set, takes precedence over CommunityID
-	CommunityShard       *shard.Shard // WARNING: I didn't test a sharded community
+	CommunityURL         string        // If set, takes precedence over CommunityID
+	CommunityShard       *wakuv2.Shard // WARNING: I didn't test a sharded community
 	Fleet                string
 	ClusterID            uint16
 	UserPrivateKeyString string // When empty a new user will be created
@@ -863,14 +865,14 @@ var testFetchRealCommunityExample = []struct {
 		CommunityID:    "0x03073514d4c14a7d10ae9fc9b0f05abc904d84166a6ac80add58bf6a3542a4e50a",
 		CommunityShard: nil,
 		Fleet:          params.FleetStatusProd,
-		ClusterID:      shard.MainStatusShardCluster,
+		ClusterID:      wakuv2.MainStatusShardCluster,
 	},
 	{
 		// Example 3,
 		// https://status.app/c/CxiACi8KFGFwIHJlcSAxIHN0dCBiZWMgbWVtEgdkc2Fkc2FkGAMiByM0MzYwREYqAxkrHAM=#zQ3shwDYZHtrLE7NqoTGjTWzWUu6hom5D4qxfskLZfgfyGRyL
 		CommunityID: "0x03f64be95ed5c925022265f9250f538f65ed3dcf6e4ef6c139803dc02a3487ae7b",
 		Fleet:       params.FleetStatusProd,
-		ClusterID:   shard.MainStatusShardCluster,
+		ClusterID:   wakuv2.MainStatusShardCluster,
 
 		CheckExpectedEnvelopes: true,
 		ExpectedShardEnvelopes: []string{
@@ -973,7 +975,7 @@ var testFetchRealCommunityExample = []struct {
 		//Example 1,
 		CommunityID:            "0x02471dd922756a3a50b623e59cf3b99355d6587e43d5c517eb55f9aea9d3fe9fe9",
 		Fleet:                  params.FleetStatusProd,
-		ClusterID:              shard.MainStatusShardCluster,
+		ClusterID:              wakuv2.MainStatusShardCluster,
 		CheckExpectedEnvelopes: true,
 		ExpectedShardEnvelopes: []string{
 			"0xc3e68e838d09e0117b3f3fd27aabe5f5a509d13e9045263c78e6890953d43547",
@@ -1013,7 +1015,7 @@ var testFetchRealCommunityExample = []struct {
 				ContractAddress: "0x21F6F5Cb75E81e5104D890D750270eD6538C50cb",
 			},
 		},
-		ClusterID:              shard.MainStatusShardCluster,
+		ClusterID:              wakuv2.MainStatusShardCluster,
 		CheckExpectedEnvelopes: false,
 		CustomOptions: []StoreNodeRequestOption{
 			WithInitialPageSize(1),
@@ -1047,8 +1049,8 @@ func (s *MessengerStoreNodeRequestSuite) TestFetchRealCommunity() {
 
 	// Prepare things depending on the configuration
 	nodesList := mailserversDB.DefaultMailserversByFleet(fleet)
-	descriptionContentTopic := wakuV2common.BytesToTopic(transport.ToTopic(communityID))
-	shardContentTopic := wakuV2common.BytesToTopic(transport.ToTopic(transport.CommunityShardInfoTopic(communityID)))
+	descriptionContentTopic := wakutypes.BytesToTopic(transport.ToTopic(communityID))
+	shardContentTopic := wakutypes.BytesToTopic(transport.ToTopic(transport.CommunityShardInfoTopic(communityID)))
 
 	communityIDBytes, err := types.DecodeHex(communityID)
 	s.Require().NoError(err)
@@ -1062,6 +1064,7 @@ func (s *MessengerStoreNodeRequestSuite) TestFetchRealCommunity() {
 
 	results := map[string]singleResult{}
 	wg := sync.WaitGroup{}
+	wakuCreationMutex := sync.Mutex{}
 
 	// We run a separate request for each node in the fleet.
 	for i, mailserver := range nodesList {
@@ -1088,8 +1091,9 @@ func (s *MessengerStoreNodeRequestSuite) TestFetchRealCommunity() {
 				enableStore: false,
 				clusterID:   clusterID,
 			}
-			wakuV2 := NewTestWakuV2(&s.Suite, cfg)
-			userWaku := gethbridge.NewGethWakuV2Wrapper(wakuV2)
+			wakuCreationMutex.Lock()
+			userWaku := NewTestWakuV2(&s.Suite, cfg)
+			wakuCreationMutex.Unlock()
 
 			//
 			// Create a messenger to process envelopes
@@ -1140,11 +1144,11 @@ func (s *MessengerStoreNodeRequestSuite) TestFetchRealCommunity() {
 
 			// Setup envelopes watcher to gather fetched envelopes
 
-			s.setupEnvelopesWatcher(wakuV2, &shardContentTopic, func(envelope *wakuV2common.ReceivedMessage) {
+			s.setupEnvelopesWatcher(userWaku, &shardContentTopic, func(envelope *wakuV2common.ReceivedMessage) {
 				result.ShardEnvelopes = append(result.ShardEnvelopes, envelope)
 			})
 
-			s.setupEnvelopesWatcher(wakuV2, &descriptionContentTopic, func(envelope *wakuV2common.ReceivedMessage) {
+			s.setupEnvelopesWatcher(userWaku, &descriptionContentTopic, func(envelope *wakuV2common.ReceivedMessage) {
 				result.Envelopes = append(result.Envelopes, envelope)
 			})
 
@@ -1157,7 +1161,7 @@ func (s *MessengerStoreNodeRequestSuite) TestFetchRealCommunity() {
 			}
 			storeNodeRequestOptions = append(storeNodeRequestOptions, exampleToRun.CustomOptions...)
 
-			fetchedCommunity, stats, err := user.storeNodeRequestsManager.FetchCommunity(communityAddress, storeNodeRequestOptions)
+			fetchedCommunity, stats, err := user.storeNodeRequestsManager.FetchCommunity(context.TODO(), communityAddress, storeNodeRequestOptions)
 
 			result.EnvelopesCount = stats.FetchedEnvelopesCount
 			result.FetchedCommunity = fetchedCommunity
@@ -1192,7 +1196,7 @@ func (s *MessengerStoreNodeRequestSuite) TestFetchingCommunityWithOwnerToken() {
 	s.createOwner()
 	s.createBob()
 
-	s.waitForAvailableStoreNode(s.owner)
+	s.WaitForAvailableStoreNode(s.owner)
 	community := s.createCommunity(s.owner)
 
 	// owner mints owner token
@@ -1225,7 +1229,7 @@ func (s *MessengerStoreNodeRequestSuite) TestFetchingCommunityWithOwnerToken() {
 	s.Require().NoError(err)
 	s.Require().Len(community.TokenPermissions(), 1)
 
-	s.waitForAvailableStoreNode(s.bob)
+	s.WaitForAvailableStoreNode(s.bob)
 
 	s.fetchCommunity(s.bob, community.CommunityShard(), community)
 }
@@ -1239,12 +1243,12 @@ func (s *MessengerStoreNodeRequestSuite) TestFetchingHistoryWhenOnline() {
 	s.createBob()
 
 	s.logger.Debug("store node info", zap.String("peerID", s.wakuStoreNode.PeerID().String()))
-	s.logger.Debug("owner node info", zap.String("peerID", gethbridge.GetGethWakuV2From(s.ownerWaku).PeerID().String()))
-	s.logger.Debug("bob node info", zap.String("peerID", gethbridge.GetGethWakuV2From(s.bobWaku).PeerID().String()))
+	s.logger.Debug("owner node info", zap.String("peerID", s.ownerWaku.PeerID().String()))
+	s.logger.Debug("bob node info", zap.String("peerID", s.bobWaku.PeerID().String()))
 
 	// Connect to store node to force "online" status
 	{
-		WaitForPeersConnected(&s.Suite, gethbridge.GetGethWakuV2From(s.bobWaku), func() peer.IDSlice {
+		WaitForPeersConnected(&s.Suite, s.bobWaku, func() peer.IDSlice {
 			err := s.bob.DialPeer(storeAddress)
 			s.Require().NoError(err)
 			return peer.IDSlice{storePeerID}
@@ -1257,7 +1261,7 @@ func (s *MessengerStoreNodeRequestSuite) TestFetchingHistoryWhenOnline() {
 
 	// bob goes offline
 	{
-		WaitForConnectionStatus(&s.Suite, gethbridge.GetGethWakuV2From(s.bobWaku), func() bool {
+		WaitForConnectionStatus(&s.Suite, s.bobWaku, func() bool {
 			err := s.bob.DropPeer(storePeerID)
 			s.Require().NoError(err)
 			return false
@@ -1270,7 +1274,7 @@ func (s *MessengerStoreNodeRequestSuite) TestFetchingHistoryWhenOnline() {
 		// Setup store nodes envelopes watcher
 		partitionedTopic := transport.PartitionedTopic(s.bob.IdentityPublicKey())
 		topic := transport.ToTopic(partitionedTopic)
-		contentTopic := wakuV2common.BytesToTopic(topic)
+		contentTopic := wakutypes.BytesToTopic(topic)
 		storeNodeSubscription := s.setupStoreNodeEnvelopesWatcher(&contentTopic)
 
 		// Send contact request
@@ -1288,7 +1292,7 @@ func (s *MessengerStoreNodeRequestSuite) TestFetchingHistoryWhenOnline() {
 
 	// owner goes offline to prevent message resend and any other side effects
 	// to go offline we disconnect from both relay and store peers
-	WaitForConnectionStatus(&s.Suite, gethbridge.GetGethWakuV2From(s.ownerWaku), func() bool {
+	WaitForConnectionStatus(&s.Suite, s.ownerWaku, func() bool {
 		err := s.owner.DropPeer(storePeerID)
 		s.Require().NoError(err)
 		return false
@@ -1301,7 +1305,7 @@ func (s *MessengerStoreNodeRequestSuite) TestFetchingHistoryWhenOnline() {
 		// We don't enable it earlier to control when we connect to the store node.
 		s.bob.config.codeControlFlags.AutoRequestHistoricMessages = true
 
-		WaitForPeersConnected(&s.Suite, gethbridge.GetGethWakuV2From(s.bobWaku), func() peer.IDSlice {
+		WaitForPeersConnected(&s.Suite, s.bobWaku, func() peer.IDSlice {
 			err := s.bob.DialPeer(storeAddress)
 			s.Require().NoError(err)
 			return peer.IDSlice{storePeerID}

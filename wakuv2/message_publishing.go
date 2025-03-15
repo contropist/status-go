@@ -11,6 +11,7 @@ import (
 	"github.com/waku-org/go-waku/waku/v2/protocol/relay"
 
 	gethcommon "github.com/ethereum/go-ethereum/common"
+	gocommon "github.com/status-im/status-go/common"
 	"github.com/status-im/status-go/wakuv2/common"
 )
 
@@ -59,6 +60,8 @@ func (w *Waku) Send(pubsubTopic string, msg *pb.WakuMessage, priority *int) ([]b
 }
 
 func (w *Waku) broadcast() {
+	defer gocommon.LogOnPanic()
+	defer w.wg.Done()
 	for {
 		var envelope *protocol.Envelope
 
@@ -75,6 +78,7 @@ func (w *Waku) broadcast() {
 }
 
 func (w *Waku) publishEnvelope(envelope *protocol.Envelope) {
+	defer gocommon.LogOnPanic()
 	defer w.wg.Done()
 
 	logger := w.logger.With(zap.Stringer("envelopeHash", envelope.Hash()), zap.String("pubsubTopic", envelope.PubsubTopic()), zap.String("contentTopic", envelope.Message().ContentTopic), zap.Int64("timestamp", envelope.Message().GetTimestamp()))
@@ -88,11 +92,11 @@ func (w *Waku) publishEnvelope(envelope *protocol.Envelope) {
 		err = w.messageSender.Send(publish.NewRequest(w.ctx, envelope))
 	}
 
-	if w.statusTelemetryClient != nil {
+	if w.metricsHandler != nil {
 		if err == nil {
-			w.statusTelemetryClient.PushSentEnvelope(w.ctx, SentEnvelope{Envelope: envelope, PublishMethod: w.messageSender.PublishMethod()})
+			w.metricsHandler.PushSentEnvelope(SentEnvelope{Envelope: envelope, PublishMethod: w.messageSender.PublishMethod()})
 		} else {
-			w.statusTelemetryClient.PushErrorSendingEnvelope(w.ctx, ErrorSendingEnvelope{Error: err, SentEnvelope: SentEnvelope{Envelope: envelope, PublishMethod: w.messageSender.PublishMethod()}})
+			w.metricsHandler.PushErrorSendingEnvelope(ErrorSendingEnvelope{Error: err, SentEnvelope: SentEnvelope{Envelope: envelope, PublishMethod: w.messageSender.PublishMethod()}})
 		}
 	}
 

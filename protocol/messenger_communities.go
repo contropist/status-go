@@ -16,12 +16,14 @@ import (
 
 	"github.com/golang/protobuf/proto"
 	"github.com/google/uuid"
+	"github.com/libp2p/go-libp2p/core/peer"
 
 	gethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
 	"go.uber.org/zap"
 
+	gocommon "github.com/status-im/status-go/common"
 	utils "github.com/status-im/status-go/common"
 
 	"github.com/status-im/status-go/account"
@@ -32,18 +34,21 @@ import (
 	"github.com/status-im/status-go/images"
 	"github.com/status-im/status-go/multiaccounts/accounts"
 	"github.com/status-im/status-go/protocol/common"
-	"github.com/status-im/status-go/protocol/common/shard"
 	"github.com/status-im/status-go/protocol/communities"
 	"github.com/status-im/status-go/protocol/communities/token"
 	"github.com/status-im/status-go/protocol/discord"
 	"github.com/status-im/status-go/protocol/encryption"
 	"github.com/status-im/status-go/protocol/protobuf"
 	"github.com/status-im/status-go/protocol/requests"
+	"github.com/status-im/status-go/protocol/storenodes"
 	"github.com/status-im/status-go/protocol/transport"
 	v1protocol "github.com/status-im/status-go/protocol/v1"
 	localnotifications "github.com/status-im/status-go/services/local-notifications"
 	"github.com/status-im/status-go/services/wallet/bigint"
 	"github.com/status-im/status-go/signal"
+	"github.com/status-im/status-go/wakuv2"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 // 7 days interval
@@ -86,10 +91,10 @@ const (
 
 type FetchCommunityRequest struct {
 	// CommunityKey should be either a public or a private community key
-	CommunityKey    string       `json:"communityKey"`
-	Shard           *shard.Shard `json:"shard"`
-	TryDatabase     bool         `json:"tryDatabase"`
-	WaitForResponse bool         `json:"waitForResponse"`
+	CommunityKey    string        `json:"communityKey"`
+	Shard           *wakuv2.Shard `json:"shard"`
+	TryDatabase     bool          `json:"tryDatabase"`
+	WaitForResponse bool          `json:"waitForResponse"`
 }
 
 func (r *FetchCommunityRequest) Validate() error {
@@ -220,6 +225,7 @@ func (m *Messenger) publishCommunityPrivilegedMemberSyncMessage(msg *communities
 func (m *Messenger) handleCommunitiesHistoryArchivesSubscription(c chan *communities.Subscription) {
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		for {
 			select {
 			case sub, more := <-c:
@@ -329,7 +335,7 @@ func (m *Messenger) handleCommunitiesSubscription(c chan *communities.Subscripti
 			for pkString := range encryptionKeyActions.CommunityKeyAction.RemovedMembers {
 				pk, err := common.HexToPubkey(pkString)
 				if err != nil {
-					m.logger.Error("failed to decode public key", zap.Error(err), zap.String("pk", pkString))
+					m.logger.Error("failed to decode public key", zap.Error(err), zap.String("pk", gocommon.TruncateWithDot(pkString)))
 				}
 				payload, err := proto.Marshal(userKicked)
 				if err != nil {
@@ -342,7 +348,7 @@ func (m *Messenger) handleCommunitiesSubscription(c chan *communities.Subscripti
 					Sender:              community.PrivateKey(),
 					SkipEncryptionLayer: true,
 					MessageType:         protobuf.ApplicationMetadataMessage_COMMUNITY_USER_KICKED,
-					PubsubTopic:         shard.DefaultNonProtectedPubsubTopic(),
+					PubsubTopic:         wakuv2.DefaultNonProtectedPubsubTopic(),
 				}
 
 				_, err = m.sender.SendPrivate(context.Background(), pk, rawMessage)
@@ -382,6 +388,7 @@ func (m *Messenger) handleCommunitiesSubscription(c chan *communities.Subscripti
 	}
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		for {
 			select {
 			case sub, more := <-c:
@@ -504,6 +511,7 @@ func (m *Messenger) updateCommunitiesActiveMembersPeriodically() {
 	ticker := time.NewTicker(5 * time.Minute)
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		for {
 			select {
 			case <-ticker.C:
@@ -641,7 +649,7 @@ func (m *Messenger) handleCommunityEncryptionKeysRequest(community *communities.
 
 	err := m.communitiesKeyDistributor.Distribute(community, keyActions)
 	if err != nil {
-		m.logger.Error("failed to send community keys", zap.Error(err), zap.String("community ID", community.IDString()))
+		m.logger.Error("failed to send community keys", zap.String("community ID", gocommon.TruncateWithDot(community.IDString())), zap.Error(err))
 	}
 
 	return nil
@@ -675,7 +683,7 @@ func (m *Messenger) handleCommunitySharedAddressesRequest(state *ReceivedMessage
 		CommunityID:         community.ID(),
 		SkipEncryptionLayer: true,
 		MessageType:         protobuf.ApplicationMetadataMessage_COMMUNITY_SHARED_ADDRESSES_RESPONSE,
-		PubsubTopic:         shard.DefaultNonProtectedPubsubTopic(),
+		PubsubTopic:         wakuv2.DefaultNonProtectedPubsubTopic(),
 		ResendType:          common.ResendTypeRawMessage,
 		ResendMethod:        common.ResendMethodSendPrivate,
 		Recipients:          []*ecdsa.PublicKey{signer},
@@ -822,6 +830,7 @@ func (m *Messenger) schedulePublishGrantsForControlledCommunities() {
 	ticker := time.NewTicker(grantUpdateInterval)
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		for {
 			select {
 			case <-ticker.C:
@@ -838,12 +847,12 @@ func (m *Messenger) CheckCommunitiesToUnmute() (*MessengerResponse, error) {
 	m.logger.Debug("watching communities to unmute")
 	response := &MessengerResponse{}
 	communities, err := m.communitiesManager.All()
+	currTime := time.Now()
 	if err != nil {
 		return nil, fmt.Errorf("couldn't get all communities: %v", err)
 	}
 	for _, community := range communities {
-		communityMuteTill := community.MuteTill().Truncate(time.Second)
-		currTime := time.Now().Truncate(time.Second)
+		communityMuteTill := community.MuteTill()
 
 		if currTime.After(communityMuteTill) && !communityMuteTill.Equal(time.Time{}) && community.Muted() {
 			err := m.communitiesManager.SetMuted(community.ID(), false)
@@ -929,11 +938,7 @@ func (m *Messenger) CommunityUpdateLastOpenedAt(communityID string) (int64, erro
 		return 0, err
 	}
 	currentTime := time.Now().Unix()
-	updatedCommunity, err := m.communitiesManager.CommunityUpdateLastOpenedAt(id, currentTime)
-	if err != nil {
-		return 0, err
-	}
-	err = m.syncCommunity(context.Background(), updatedCommunity, m.dispatchMessage)
+	_, err = m.communitiesManager.CommunityUpdateLastOpenedAt(id, currentTime)
 	if err != nil {
 		return 0, err
 	}
@@ -1041,7 +1046,7 @@ func (m *Messenger) JoinCommunity(ctx context.Context, communityID types.HexByte
 	return mr, nil
 }
 
-func (m *Messenger) subscribeToCommunityShard(communityID []byte, shard *shard.Shard) error {
+func (m *Messenger) subscribeToCommunityShard(communityID []byte, shard *wakuv2.Shard) error {
 	if m.transport.WakuVersion() != 2 {
 		return nil
 	}
@@ -1062,7 +1067,7 @@ func (m *Messenger) subscribeToCommunityShard(communityID []byte, shard *shard.S
 	return m.transport.SubscribeToPubsubTopic(pubsubTopic, pubK)
 }
 
-func (m *Messenger) unsubscribeFromShard(shard *shard.Shard) error {
+func (m *Messenger) unsubscribeFromShard(shard *wakuv2.Shard) error {
 	if m.transport.WakuVersion() != 2 {
 		return nil
 	}
@@ -1206,6 +1211,8 @@ func (m *Messenger) MuteDuration(mutedType requests.MutingVariation) (time.Time,
 		MuteTill = time.Now().Add(MuteFor1HrsDuration)
 	case MuteFor8Hr:
 		MuteTill = time.Now().Add(MuteFor8HrsDuration)
+	case MuteFor24Hr:
+		MuteTill = time.Now().Add(MuteFor24HrsDuration)
 	case MuteFor1Week:
 		MuteTill = time.Now().Add(MuteFor1WeekDuration)
 	default:
@@ -1489,7 +1496,7 @@ func (m *Messenger) RequestToJoinCommunity(request *requests.RequestToJoinCommun
 		ResendType:          common.ResendTypeRawMessage,
 		SkipEncryptionLayer: true,
 		MessageType:         protobuf.ApplicationMetadataMessage_COMMUNITY_REQUEST_TO_JOIN,
-		PubsubTopic:         shard.DefaultNonProtectedPubsubTopic(),
+		PubsubTopic:         wakuv2.DefaultNonProtectedPubsubTopic(),
 		Priority:            &common.HighPriority,
 	}
 
@@ -1498,8 +1505,10 @@ func (m *Messenger) RequestToJoinCommunity(request *requests.RequestToJoinCommun
 		return nil, err
 	}
 
-	if _, err = m.AddRawMessageToWatch(rawMessage); err != nil {
-		return nil, err
+	if rawMessage.ResendType == common.ResendTypeRawMessage {
+		if _, err = m.AddRawMessageToWatch(rawMessage); err != nil {
+			return nil, err
+		}
 	}
 
 	if !community.AutoAccept() {
@@ -1514,6 +1523,9 @@ func (m *Messenger) RequestToJoinCommunity(request *requests.RequestToJoinCommun
 		privMembersArray = append(privMembersArray, privilegedMembersSorted[protobuf.CommunityMember_ROLE_ADMIN]...)
 
 		rawMessage.ResendMethod = common.ResendMethodSendPrivate
+		rawMessage.ResendType = common.ResendTypeDataSync
+		// MVDS only supports sending encrypted message
+		rawMessage.SkipEncryptionLayer = false
 		rawMessage.ID = ""
 		rawMessage.Recipients = privMembersArray
 
@@ -1527,14 +1539,9 @@ func (m *Messenger) RequestToJoinCommunity(request *requests.RequestToJoinCommun
 		rawMessage.Payload = payload
 
 		for _, member := range rawMessage.Recipients {
+			rawMessage.Sender = nil
 			_, err := m.sender.SendPrivate(context.Background(), member, rawMessage)
 			if err != nil {
-				return nil, err
-			}
-		}
-
-		if len(rawMessage.Recipients) > 0 {
-			if _, err = m.AddRawMessageToWatch(rawMessage); err != nil {
 				return nil, err
 			}
 		}
@@ -1546,6 +1553,7 @@ func (m *Messenger) RequestToJoinCommunity(request *requests.RequestToJoinCommun
 
 	// We send a push notification in the background
 	go func() {
+		defer gocommon.LogOnPanic()
 		if m.pushNotificationClient != nil {
 			pks, err := community.CanManageUsersPublicKeys()
 			if err != nil {
@@ -1866,7 +1874,7 @@ func (m *Messenger) CancelRequestToJoinCommunity(ctx context.Context, request *r
 		CommunityID:         community.ID(),
 		SkipEncryptionLayer: true,
 		MessageType:         protobuf.ApplicationMetadataMessage_COMMUNITY_CANCEL_REQUEST_TO_JOIN,
-		PubsubTopic:         shard.DefaultNonProtectedPubsubTopic(),
+		PubsubTopic:         wakuv2.DefaultNonProtectedPubsubTopic(),
 		ResendType:          common.ResendTypeRawMessage,
 		Priority:            &common.HighPriority,
 	}
@@ -1906,6 +1914,10 @@ func (m *Messenger) CancelRequestToJoinCommunity(ctx context.Context, request *r
 		}
 
 		for _, privilegedMember := range privMembersArray {
+			// Reset rawMessage.Sender to nil on each iteration so that SendPrivate can
+			// assign the correct sender. This prevents any modifications from previous
+			// SendPrivate calls from affecting subsequent ones.
+			rawMessage.Sender = nil
 			_, err := m.sender.SendPrivate(context.Background(), privilegedMember, &rawMessage)
 			if err != nil {
 				return nil, err
@@ -1951,6 +1963,10 @@ func (m *Messenger) CancelRequestToJoinCommunity(ctx context.Context, request *r
 }
 
 func (m *Messenger) acceptRequestToJoinCommunity(requestToJoin *communities.RequestToJoin) (*MessengerResponse, error) {
+	m.logger.Debug("accept request to join community",
+		zap.String("community", requestToJoin.CommunityID.String()),
+		zap.String("pubkey", requestToJoin.PublicKey))
+
 	community, err := m.communitiesManager.AcceptRequestToJoin(requestToJoin)
 	if err != nil {
 		return nil, err
@@ -1981,14 +1997,20 @@ func (m *Messenger) acceptRequestToJoinCommunity(requestToJoin *communities.Requ
 			return nil, err
 		}
 
+		descriptionMessage, err := community.ToProtocolMessageBytes()
+		if err != nil {
+			return nil, err
+		}
+
 		requestToJoinResponseProto := &protobuf.CommunityRequestToJoinResponse{
-			Clock:                    community.Clock(),
-			Accepted:                 true,
-			CommunityId:              community.ID(),
-			Community:                encryptedDescription,
-			Grant:                    grant,
-			ProtectedTopicPrivateKey: crypto.FromECDSA(key),
-			Shard:                    community.Shard().Protobuffer(),
+			Clock:                               community.Clock(),
+			Accepted:                            true,
+			CommunityId:                         community.ID(),
+			Community:                           encryptedDescription, // Deprecated but kept for backward compatibility, to be removed in future
+			Grant:                               grant,
+			ProtectedTopicPrivateKey:            crypto.FromECDSA(key),
+			Shard:                               community.Shard().Protobuffer(),
+			CommunityDescriptionProtocolMessage: descriptionMessage,
 		}
 
 		// The purpose of this torrent code is to get the 'magnetlink' to populate 'requestToJoinResponseProto.MagnetUri'
@@ -2012,11 +2034,21 @@ func (m *Messenger) acceptRequestToJoinCommunity(requestToJoin *communities.Requ
 			CommunityID:         community.ID(),
 			SkipEncryptionLayer: true,
 			MessageType:         protobuf.ApplicationMetadataMessage_COMMUNITY_REQUEST_TO_JOIN_RESPONSE,
-			PubsubTopic:         shard.DefaultNonProtectedPubsubTopic(),
+			PubsubTopic:         wakuv2.DefaultNonProtectedPubsubTopic(),
 			ResendType:          common.ResendTypeRawMessage,
 			ResendMethod:        common.ResendMethodSendPrivate,
 			Recipients:          []*ecdsa.PublicKey{pk},
 			Priority:            &common.HighPriority,
+		}
+
+		// Non-tokenized community treat community public key as the control node,
+		// tokenized community set control node to the public key of token owner.
+		// MVDS doesn't support custom sender, and use the identity key for signing messages,
+		// receiver will verify the message of community join response is signed by control node.
+		if !community.PublicKey().Equal(community.ControlNode()) {
+			rawMessage.ResendType = common.ResendTypeDataSync
+			rawMessage.SkipEncryptionLayer = false
+			rawMessage.Sender = nil
 		}
 
 		if community.Encrypted() {
@@ -2029,8 +2061,10 @@ func (m *Messenger) acceptRequestToJoinCommunity(requestToJoin *communities.Requ
 			return nil, err
 		}
 
-		if _, err = m.AddRawMessageToWatch(rawMessage); err != nil {
-			return nil, err
+		if rawMessage.ResendType == common.ResendTypeRawMessage {
+			if _, err = m.AddRawMessageToWatch(rawMessage); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -2475,7 +2509,7 @@ func (m *Messenger) DefaultFilters(o *communities.Community) []transport.Filters
 		{ChatID: updatesChannelID, PubsubTopic: communityPubsubTopic},
 		{ChatID: mlChannelID, PubsubTopic: communityPubsubTopic},
 		{ChatID: memberUpdateChannelID, PubsubTopic: communityPubsubTopic},
-		{ChatID: uncompressedPubKey, PubsubTopic: shard.DefaultNonProtectedPubsubTopic()},
+		{ChatID: uncompressedPubKey, PubsubTopic: wakuv2.DefaultNonProtectedPubsubTopic()},
 	}
 
 	return filters
@@ -2687,7 +2721,12 @@ func (m *Messenger) UpdateCommunityFilters(community *communities.Community) err
 	publicFiltersToInit := make([]transport.FiltersToInitialize, 0, len(defaultFilters)+len(community.Chats()))
 
 	publicFiltersToInit = append(publicFiltersToInit, defaultFilters...)
-
+	for _, filter := range defaultFilters {
+		_, err := m.transport.RemoveFilterByChatID(filter.ChatID)
+		if err != nil {
+			return err
+		}
+	}
 	for chatID := range community.Chats() {
 		communityChatID := community.IDString() + chatID
 		_, err := m.transport.RemoveFilterByChatID(communityChatID)
@@ -3265,7 +3304,7 @@ func (m *Messenger) FetchCommunity(request *FetchCommunityRequest) (*communities
 		WithWaitForResponseOption(request.WaitForResponse),
 	}
 
-	community, _, err := m.storeNodeRequestsManager.FetchCommunity(communityAddress, options)
+	community, _, err := m.storeNodeRequestsManager.FetchCommunity(m.ctx, communityAddress, options)
 
 	return community, err
 }
@@ -3273,7 +3312,7 @@ func (m *Messenger) FetchCommunity(request *FetchCommunityRequest) (*communities
 // fetchCommunities installs filter for community and requests its details from store node.
 // When response received it will be passed through signals handler.
 func (m *Messenger) fetchCommunities(communities []communities.CommunityShard) error {
-	return m.storeNodeRequestsManager.FetchCommunities(communities, []StoreNodeRequestOption{})
+	return m.storeNodeRequestsManager.FetchCommunities(m.ctx, communities, []StoreNodeRequestOption{})
 }
 
 // passStoredCommunityInfoToSignalHandler calls signal handler with community info
@@ -3534,7 +3573,7 @@ func (m *Messenger) HandleCommunityShardKey(state *ReceivedMessageState, message
 }
 
 func (m *Messenger) handleCommunityShardAndFiltersFromProto(community *communities.Community, message *protobuf.CommunityShardKey) error {
-	err := m.communitiesManager.UpdateShard(community, shard.FromProtobuff(message.Shard), message.Clock)
+	err := m.communitiesManager.UpdateShard(community, wakuv2.FromProtobuff(message.Shard), message.Clock)
 	if err != nil {
 		return err
 	}
@@ -3556,7 +3595,7 @@ func (m *Messenger) handleCommunityShardAndFiltersFromProto(community *communiti
 	}
 
 	// Unsubscribing from existing shard
-	if community.Shard() != nil && community.Shard() != shard.FromProtobuff(message.GetShard()) {
+	if community.Shard() != nil && community.Shard() != wakuv2.FromProtobuff(message.GetShard()) {
 		err := m.unsubscribeFromShard(community.Shard())
 		if err != nil {
 			return err
@@ -3570,7 +3609,7 @@ func (m *Messenger) handleCommunityShardAndFiltersFromProto(community *communiti
 		return err
 	}
 	// Update community filters in case of change of shard
-	if community.Shard() != shard.FromProtobuff(message.GetShard()) {
+	if community.Shard() != wakuv2.FromProtobuff(message.GetShard()) {
 		err = m.UpdateCommunityFilters(community)
 		if err != nil {
 			return err
@@ -3687,10 +3726,10 @@ func (m *Messenger) sendSharedAddressToControlNode(receiver *ecdsa.PublicKey, co
 	rawMessage := common.RawMessage{
 		Payload:             payload,
 		CommunityID:         community.ID(),
-		SkipEncryptionLayer: true,
+		SkipEncryptionLayer: false,
 		MessageType:         protobuf.ApplicationMetadataMessage_COMMUNITY_REQUEST_TO_JOIN,
 		PubsubTopic:         community.PubsubTopic(), // TODO: confirm if it should be sent in community pubsub topic
-		ResendType:          common.ResendTypeRawMessage,
+		ResendType:          common.ResendTypeDataSync,
 		ResendMethod:        common.ResendMethodSendPrivate,
 		Recipients:          []*ecdsa.PublicKey{receiver},
 	}
@@ -3703,8 +3742,6 @@ func (m *Messenger) sendSharedAddressToControlNode(receiver *ecdsa.PublicKey, co
 	if err != nil {
 		return nil, err
 	}
-
-	_, err = m.AddRawMessageToWatch(&rawMessage)
 
 	return requestToJoin, err
 }
@@ -3789,7 +3826,7 @@ func (m *Messenger) handleSyncInstallationCommunity(messageState *ReceivedMessag
 	// This is good to do so that we don't have to queue all the actions done after the handled community description.
 	// `signer` is `communityID` for a community with no owner token and `owner public key` otherwise
 	signer, err := utils.RecoverKey(&amm)
-	if err != nil {
+	if signer == nil || err != nil {
 		logger.Debug("failed to recover community description signer", zap.Error(err))
 		return err
 	}
@@ -3884,7 +3921,7 @@ func (m *Messenger) HandleSyncCommunitySettings(messageState *ReceivedMessageSta
 }
 
 func (m *Messenger) InitHistoryArchiveTasks(communities []*communities.Community) {
-
+	defer utils.LogOnPanic()
 	m.logger.Debug("initializing history archive tasks")
 
 	for _, c := range communities {
@@ -3920,11 +3957,13 @@ func (m *Messenger) InitHistoryArchiveTasks(communities []*communities.Community
 				continue
 			}
 
-			topics := []types.TopicType{}
+			topics := []wakutypes.TopicType{}
 
 			for _, filter := range filters {
 				topics = append(topics, filter.ContentTopic)
 			}
+
+			filters = append(filters, m.transport.FilterByChatID(c.UniversalChatID()))
 
 			// First we need to know the timestamp of the latest waku message
 			// we've received for this community, so we can request messages we've
@@ -3946,8 +3985,8 @@ func (m *Messenger) InitHistoryArchiveTasks(communities []*communities.Community
 			}
 
 			// Request possibly missed waku messages for community
-			ms := m.getActiveMailserver(c.ID().String())
-			_, err = m.syncFiltersFrom(*ms, filters, uint32(latestWakuMessageTimestamp))
+			ms := m.getCommunityStorenode(c.ID().String())
+			_, err = m.syncFiltersFrom(ms, filters, uint32(latestWakuMessageTimestamp))
 			if err != nil {
 				m.logger.Error("failed to request missing messages", zap.Error(err))
 				continue
@@ -4005,6 +4044,7 @@ func (m *Messenger) InitHistoryArchiveTasks(communities []*communities.Community
 
 func (m *Messenger) enableHistoryArchivesImportAfterDelay() {
 	go func() {
+		defer gocommon.LogOnPanic()
 		time.Sleep(importInitialDelay)
 		m.importDelayer.once.Do(func() {
 			close(m.importDelayer.wait)
@@ -4061,6 +4101,7 @@ func (m *Messenger) resumeHistoryArchivesImport(communityID types.HexBytes) erro
 	task.Waiter.Add(1)
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		defer task.Waiter.Done()
 		err := m.importHistoryArchives(communityID, task.CancelChan)
 		if err != nil {
@@ -4085,6 +4126,7 @@ func (m *Messenger) importHistoryArchives(communityID types.HexBytes, cancel cha
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	go func() {
+		defer gocommon.LogOnPanic()
 		<-cancel
 		cancelFunc()
 	}()
@@ -4358,8 +4400,8 @@ func (m *Messenger) generateSystemPinnedMessage(pinMessage *common.PinMessage, c
 	return systemMessage, nil
 }
 
-func (m *Messenger) pinMessagesToWakuMessages(pinMessages []*common.PinMessage, c *communities.Community) ([]*types.Message, error) {
-	wakuMessages := make([]*types.Message, 0)
+func (m *Messenger) pinMessagesToWakuMessages(pinMessages []*common.PinMessage, c *communities.Community) ([]*wakutypes.Message, error) {
+	wakuMessages := make([]*wakutypes.Message, 0)
 	for _, msg := range pinMessages {
 
 		filter := m.transport.FilterByChatID(msg.LocalChatID)
@@ -4373,7 +4415,7 @@ func (m *Messenger) pinMessagesToWakuMessages(pinMessages []*common.PinMessage, 
 		}
 
 		hash := crypto.Keccak256Hash(append([]byte(c.IDString()), wrappedPayload...))
-		wakuMessage := &types.Message{
+		wakuMessage := &wakutypes.Message{
 			Sig:          crypto.FromECDSAPub(&c.PrivateKey().PublicKey),
 			Timestamp:    uint32(msg.WhisperTimestamp / 1000),
 			Topic:        filter.ContentTopic,
@@ -4388,8 +4430,8 @@ func (m *Messenger) pinMessagesToWakuMessages(pinMessages []*common.PinMessage, 
 	return wakuMessages, nil
 }
 
-func (m *Messenger) chatMessagesToWakuMessages(chatMessages []*common.Message, c *communities.Community) ([]*types.Message, error) {
-	wakuMessages := make([]*types.Message, 0)
+func (m *Messenger) chatMessagesToWakuMessages(chatMessages []*common.Message, c *communities.Community) ([]*wakutypes.Message, error) {
+	wakuMessages := make([]*wakutypes.Message, 0)
 	for _, msg := range chatMessages {
 
 		filter := m.transport.FilterByChatID(msg.LocalChatID)
@@ -4404,7 +4446,7 @@ func (m *Messenger) chatMessagesToWakuMessages(chatMessages []*common.Message, c
 		}
 
 		hash := crypto.Keccak256Hash([]byte(msg.ID))
-		wakuMessage := &types.Message{
+		wakuMessage := &wakutypes.Message{
 			Sig:          crypto.FromECDSAPub(&c.PrivateKey().PublicKey),
 			Timestamp:    uint32(msg.WhisperTimestamp / 1000),
 			Topic:        filter.ContentTopic,
@@ -4646,6 +4688,7 @@ func (m *Messenger) startCommunityRekeyLoop() {
 
 	ticker := time.NewTicker(d)
 	go func() {
+		defer gocommon.LogOnPanic()
 		for {
 			select {
 			case <-ticker.C:
@@ -4710,7 +4753,7 @@ func (m *Messenger) rekeyCommunities(logger *zap.Logger) {
 
 		err = m.communitiesKeyDistributor.Distribute(c, keyActions)
 		if err != nil {
-			logger.Error("failed to rekey community", zap.Error(err), zap.String("community ID", c.IDString()))
+			logger.Error("failed to rekey community", zap.String("community ID", gocommon.TruncateWithDot(c.IDString())), zap.Error(err))
 			continue
 		}
 	}
@@ -4869,7 +4912,11 @@ func (m *Messenger) CreateResponseWithACNotification(communityID string, acType 
 // use pointer to rawMessage to get the message ID and other updated properties.
 func (m *Messenger) SendMessageToControlNode(community *communities.Community, rawMessage *common.RawMessage) ([]byte, error) {
 	if !community.PublicKey().Equal(community.ControlNode()) {
+		m.logger.Debug("control node is different with community pubkey", zap.Any("control:", community.ControlNode()), zap.Any("communityPubkey:", community.PublicKey()))
 		rawMessage.ResendMethod = common.ResendMethodSendPrivate
+		rawMessage.ResendType = common.ResendTypeDataSync
+		// MVDS only supports sending encrypted message
+		rawMessage.SkipEncryptionLayer = false
 		rawMessage.Recipients = append(rawMessage.Recipients, community.ControlNode())
 		return m.sender.SendPrivate(context.Background(), community.ControlNode(), rawMessage)
 	}
@@ -5036,18 +5083,18 @@ func (m *Messenger) HandleDeleteCommunityMemberMessages(state *ReceivedMessageSt
 func (m *Messenger) leaveCommunityOnSoftKick(community *communities.Community, messengerResponse *MessengerResponse) {
 	response, err := m.kickedOutOfCommunity(community.ID(), true)
 	if err != nil {
-		m.logger.Error("member soft kick error", zap.String("communityID", types.EncodeHex(community.ID())), zap.Error(err))
+		m.logger.Error("member soft kick error", zap.String("communityID", gocommon.TruncateWithDot(types.EncodeHex(community.ID()))), zap.Error(err))
 	}
 
 	if err := messengerResponse.Merge(response); err != nil {
-		m.logger.Error("cannot merge leaveCommunityOnSoftKick response", zap.String("communityID", types.EncodeHex(community.ID())), zap.Error(err))
+		m.logger.Error("cannot merge leaveCommunityOnSoftKick response", zap.String("communityID", gocommon.TruncateWithDot(types.EncodeHex(community.ID()))), zap.Error(err))
 	}
 }
 
 func (m *Messenger) shareRevealedAccountsOnSoftKick(community *communities.Community, messengerResponse *MessengerResponse) {
 	requestToJoin, err := m.sendSharedAddressToControlNode(community.ControlNode(), community)
 	if err != nil {
-		m.logger.Error("share address to control node failed", zap.String("id", types.EncodeHex(community.ID())), zap.Error(err))
+		m.logger.Error("share address to control node failed", zap.String("id", gocommon.TruncateWithDot(types.EncodeHex(community.ID()))), zap.Error(err))
 
 		if err == communities.ErrRevealedAccountsAbsent || err == communities.ErrNoRevealedAccountsSignature {
 			m.AddActivityCenterNotificationToResponse(community.IDString(), ActivityCenterNotificationTypeShareAccounts, messengerResponse)
@@ -5088,6 +5135,7 @@ func (m *Messenger) startRequestMissingCommunityChannelsHRKeysLoop() {
 	logger := m.logger.Named("requestMissingCommunityChannelsHRKeysLoop")
 
 	go func() {
+		defer gocommon.LogOnPanic()
 		for {
 			select {
 			case <-time.After(5 * time.Minute):
@@ -5121,4 +5169,33 @@ func (m *Messenger) startRequestMissingCommunityChannelsHRKeysLoop() {
 			}
 		}
 	}()
+}
+
+// getCommunityStorenode returns the active mailserver if a communityID is present then it'll return the mailserver
+// for that community if it has a mailserver setup otherwise it'll return the global mailserver
+func (m *Messenger) getCommunityStorenode(communityID ...string) peer.ID {
+	if m.transport.WakuVersion() != 2 {
+		return ""
+	}
+
+	if len(communityID) == 0 || communityID[0] == "" {
+		return m.transport.GetActiveStorenode()
+	}
+
+	ms, err := m.communityStorenodes.GetStorenodeByCommunityID(communityID[0])
+	if err != nil {
+		if !errors.Is(err, storenodes.ErrNotFound) {
+			m.logger.Error("getting storenode for community, using global", zap.String("communityID", gocommon.TruncateWithDot(communityID[0])), zap.Error(err))
+		}
+		// if we don't find a specific mailserver for the community, we just use the regular mailserverCycle's one
+		return m.transport.GetActiveStorenode()
+	}
+
+	peerID, err := ms.PeerID()
+	if err != nil {
+		m.logger.Error("getting storenode for community, using global", zap.String("communityID", gocommon.TruncateWithDot(communityID[0])), zap.Error(err))
+		return m.transport.GetActiveStorenode()
+	}
+
+	return peerID
 }

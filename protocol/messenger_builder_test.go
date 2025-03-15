@@ -10,13 +10,15 @@ import (
 	"github.com/status-im/status-go/appdatabase"
 	"github.com/status-im/status-go/common/dbsetup"
 	"github.com/status-im/status-go/eth-node/crypto"
-	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/multiaccounts"
+	"github.com/status-im/status-go/multiaccounts/settings"
 	"github.com/status-im/status-go/protocol/protobuf"
 	"github.com/status-im/status-go/protocol/tt"
 	v1protocol "github.com/status-im/status-go/protocol/v1"
 	"github.com/status-im/status-go/t/helpers"
 	"github.com/status-im/status-go/walletdatabase"
+
+	wakutypes "github.com/status-im/status-go/waku/types"
 )
 
 type testMessengerConfig struct {
@@ -51,7 +53,7 @@ func (tmc *testMessengerConfig) complete() error {
 	return nil
 }
 
-func newTestMessenger(waku types.Waku, config testMessengerConfig) (*Messenger, error) {
+func newTestMessenger(waku wakutypes.Waku, config testMessengerConfig) (*Messenger, error) {
 	err := config.complete()
 	if err != nil {
 		return nil, err
@@ -83,6 +85,7 @@ func newTestMessenger(waku types.Waku, config testMessengerConfig) (*Messenger, 
 		WithToplevelDatabaseMigrations(),
 		WithBrowserDatabase(nil),
 		WithCuratedCommunitiesUpdateLoop(false),
+		WithStubOnlineChecker(),
 	}
 	options = append(options, config.extraOptions...)
 
@@ -105,6 +108,11 @@ func newTestMessenger(waku types.Waku, config testMessengerConfig) (*Messenger, 
 
 	if config.messagesOrderController != nil {
 		m.retrievedMessagesIteratorFactory = config.messagesOrderController.newMessagesIterator
+	}
+
+	err = m.settings.SetUseMailservers(false)
+	if err != nil {
+		return nil, err
 	}
 
 	err = m.InitInstallations()
@@ -141,4 +149,13 @@ func (u *unhandledMessagesTracker) addMessage(msg *v1protocol.StatusMessage, err
 		err:           err,
 	}
 	u.messages[msgType] = append(u.messages[msgType], newMessage)
+}
+
+func newTestSettings() settings.Settings {
+	return settings.Settings{
+		DisplayName:               DefaultProfileDisplayName,
+		ProfilePicturesShowTo:     1,
+		ProfilePicturesVisibility: 1,
+		URLUnfurlingMode:          settings.URLUnfurlingAlwaysAsk,
+	}
 }

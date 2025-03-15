@@ -12,7 +12,7 @@ import (
 	walletCommon "github.com/status-im/status-go/services/wallet/common"
 )
 
-const transactionsURL = "https://apiv5.paraswap.io/transactions/%d"
+const transactionsURL = "https://api.paraswap.io/transactions/%d"
 
 type Transaction struct {
 	From     string `json:"from"`
@@ -50,7 +50,7 @@ func (c *ClientV5) BuildTransaction(ctx context.Context, srcTokenAddress common.
 		params["destAmount"] = destAmountWei.String()
 	}
 	params["partner"] = c.partnerID
-	if c.partnerAddress != walletCommon.ZeroAddress && c.partnerFeePcnt > 0 {
+	if c.partnerAddress != walletCommon.ZeroAddress() && c.partnerFeePcnt > 0 {
 		params["partnerAddress"] = c.partnerAddress.Hex()
 		params["partnerFeeBps"] = uint(c.partnerFeePcnt * 100)
 	}
